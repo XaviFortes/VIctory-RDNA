@@ -4,7 +4,7 @@ VIctory-RDNA is a Direct3D 12 compatibility layer for Xbox Series titles, tuned 
 
 This is an experimental project. GTA VI is the title used for the performance measurements below. Compatibility varies by title, build, and console profile. Supply your own game files from a copy you are authorized to use and keep the executable alongside its data files.
 
-On an RX 7900 XT, the final minute of two GTA VI runs had median sampled rates of **13.6 FPS** and **12.9 FPS**. Both sessions ended cleanly after just over four minutes. [GTA VI measurements](#gta-vi-measurements)
+On an RX 7900 XT, a warm-cache GTA VI run lasted **48 min 26 s from startup to GPU device removal**. Across 509 heavy-rendering samples it recorded a **12.1 FPS median** at 4K output. Two shorter captures ended cleanly, with final-minute sample medians of **13.6 FPS** and **12.9 FPS**. [GTA VI measurements](#gta-vi-measurements)
 
 ## Get started
 
@@ -77,6 +77,7 @@ From the **project folder**, pass `-Exe` to point to a game stored elsewhere.
 | `-Exe <path>` | Auto-detect | Explicit title executable. Auto-detection checks the calling directory, then the project's parent and the project itself. |
 | `-Console <mode>` | `series-x` | Accepts `series-x` or `series-s`. |
 | `-Fps <N>` | `0` | Controls the target frame interval. |
+| `-Output <mode>` | Title default | Requests a supported output mode such as `1440p` or `1080p`. |
 | `-Safe` / `-RayTracing` | Off | Selects the same renderer options as the desktop launcher. |
 | `-Build <profile>` | `release` | Accepts `release` or `diag`. |
 | `-Rebuild` | Off | Invokes Cargo even when the binary already exists. |
@@ -93,6 +94,26 @@ From Command Prompt, `launch.bat -Log run.log` still invokes the command-line fl
 - The launch preset also uses experimental paths from VIctory-7900XTX, including multithreaded command-list translation, zero-copy constants, descriptor tracking, GPU-side fills, AVX2 copies, and copy-queue texture uploads.
 
 ### GTA VI measurements
+
+#### Warm-cache run with direct constant-buffer reads
+
+On **26 November 2026**, `victory-rdna4-warm.log` recorded a Windows D3D12 run on an **RX 7900 XT**, using the **RDNA3 Fast** release preset and **Series X** profile at **3840 × 2160 output**. The run reached heavy rendering at about **1 min 08 s** and continued until a GPU device removal at **48 min 26 s**.
+
+| Metric | Heavy-rendering samples across the run | Final 60 seconds before device removal |
+| --- | ---: | ---: |
+| Samples | 509 | 11 |
+| Median FPS | **12.1** | **8.5** |
+| Median frame time | 82.9 ms | 117.7 ms |
+| Median submission preparation | 57.9 ms | 63.6 ms |
+| Median copy preparation | 24.3 ms (73.3 MB/frame) | 23.3 ms (72.7 MB/frame) |
+| Median heap-buffer pass | 12.9 ms | 22.9 ms |
+| Median GPU settle waits | 0.0 ms | 17.1 ms |
+
+The direct constant-buffer path (`VICTORY_PORT_CBV=1`) recorded a median of **14,227 table constant-buffer reads in place per frame**, avoiding about **5,446 KB/frame** of copies in samples with at least 1,001 direct reads. The fallback still copied a median of **1,305** bindings per frame in those same samples.
+
+The timing table uses periodic swap-chain measurements with at least 1,000 draws per frame. The elapsed time includes startup and loading. The capture does not establish continuous player-controlled time or a full-session FPS average.
+
+#### Short captures
 
 Two local captures from **26 November 2026** on Windows D3D12 with an **AMD Radeon RX 7900 XT**. Both used the **RDNA3 Fast** release preset, **Xbox Series X**, the title's **33.333 ms** frame interval, SDR, and a **3840 × 2160 presentation surface**. That is the output size reported by the swap chain. The logs do not report the internal render resolution. The fast preset leaves ray tracing off by default.
 
@@ -173,6 +194,18 @@ The second capture had a lower median heap-buffer pass time and shorter copy pre
 The memory figures are D3D12 budget snapshots. Texture upload volume is cumulative. The missing-pipeline drops and texture warnings document remaining renderer limitations. Neither capture records enough visual detail to score picture quality.
 
 </details>
+
+## Known problems
+
+- **Long-session GPU device removal.** The warm run ended with `DXGI_ERROR_INVALID_CALL` (`0x887A0001`) while submissions were queued ahead. The final sample was **6.0 FPS at 167.6 ms/frame**, with **42.5 ms** in the heap-buffer pass and **21.5 ms** in GPU settle waits. The runtime recorded large resource sweeps in the last minute, including one that released about **1.13 GiB** of host window copies. The log does not identify the invalid call or establish that memory pressure caused it.
+- **Rendering gaps.** Missing host pipelines can drop draws, and the texture path still reports refresh warnings.
+
+These are two separate follow-up tests for the warm run. Their effect on frame rate and stability has yet to be measured.
+
+```powershell
+.\VIctory-RDNA\scripts\play-rdna.ps1 -Output 1440p -Log .\victory-rdna-1440p.log
+.\VIctory-RDNA\scripts\play-rdna.ps1 -More @{ VICTORY_RESIDENCY = '1' } -Log .\victory-rdna-residency.log
+```
 
 ## Troubleshooting
 
