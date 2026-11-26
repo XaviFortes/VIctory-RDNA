@@ -3,7 +3,7 @@
     One-command launcher for VIctory-RDNA with tuned AMD RDNA3 defaults.
 
 .DESCRIPTION
-    Starts GTA VI (Xbox Series build) under VIctory-RDNA with the proven
+    Starts an Xbox Series title under VIctory-RDNA with the tuned
     performance flags (including GPU-side 1 MiB+ buffer compares, zero-copy
     constants heap, patched descriptor tracking, and multi-threaded list
     translation).
@@ -36,6 +36,41 @@ param(
 $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 
+if ($Log) {
+    $Log = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Log)
+    [System.IO.File]::WriteAllText($Log, '', [System.Text.Encoding]::Unicode)
+}
+
+function Write-LaunchMessage {
+    param([string]$Message, [ConsoleColor]$Color = 'Gray')
+    Write-Host $Message -ForegroundColor $Color
+    if ($Log) { Add-Content -LiteralPath $Log -Value $Message -Encoding Unicode }
+}
+
+function Invoke-LaunchProgram {
+    param([string]$Program, [string[]]$ProgramArguments)
+    $global:LASTEXITCODE = 1
+    if ($Log) {
+        # Windows PowerShell wraps native stderr as ErrorRecords when it is redirected.
+        # Keep those messages in the log, even with a terminating preference in the caller.
+        $writer = [System.IO.StreamWriter]::new($Log, $true, [System.Text.Encoding]::Unicode)
+        $writer.AutoFlush = $true
+        try {
+            $ErrorActionPreference = 'Continue'
+            $PSNativeCommandUseErrorActionPreference = $false
+            & $Program @ProgramArguments 2>&1 | ForEach-Object {
+                $line = [string]$_
+                $writer.WriteLine($line)
+                $line
+            }
+        } finally {
+            $writer.Dispose()
+        }
+    } else {
+        & $Program @ProgramArguments
+    }
+}
+
 # 1. Locate game executable automatically if not passed explicitly.
 if (-not $Exe) {
     $candidates = @(
@@ -43,74 +78,58 @@ if (-not $Exe) {
         (Join-Path $repoRoot '..\game_scarlett_master.exe'),
         (Join-Path $repoRoot 'game_scarlett_master.exe')
     )
-    $Exe = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+    $Exe = $candidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
     if (-not $Exe) {
-        Write-Host "Could not find game_scarlett_master.exe automatically." -ForegroundColor Red
-        Write-Host "Pass it explicitly:  .\scripts\play-rdna.ps1 -Exe <path\to\game_scarlett_master.exe>"
+        Write-LaunchMessage "Could not find game_scarlett_master.exe automatically." Red
+        Write-LaunchMessage "Pass it explicitly: .\scripts\play-rdna.ps1 -Exe <path\to\game_scarlett_master.exe>"
         exit 1
     }
 }
-if (-not (Test-Path $Exe)) {
-    Write-Host "Executable not found: $Exe" -ForegroundColor Red
+if (-not (Test-Path -LiteralPath $Exe -PathType Leaf)) {
+    Write-LaunchMessage "Executable not found: $Exe" Red
     exit 1
 }
-$Exe = (Resolve-Path $Exe).Path
+$Exe = (Resolve-Path -LiteralPath $Exe).Path
 $gameDir = Split-Path -Parent $Exe
 
 # 2. Ensure victory.exe is built (build automatically on first run or -Rebuild).
 $victory = Join-Path $repoRoot "target\$Build\victory.exe"
-if ($Rebuild -or -not (Test-Path $victory)) {
-    Write-Host "Building VIctory-RDNA ($Build profile)..." -ForegroundColor Cyan
+if ($Rebuild -or -not (Test-Path -LiteralPath $victory -PathType Leaf)) {
+    Write-LaunchMessage "Building VIctory-RDNA ($Build profile)..." Cyan
+    $cargo = Get-Command cargo.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $cargo) {
+        Write-LaunchMessage "Cargo was not found. Install Rust with rustup, then reopen the launcher." Red
+        exit 1
+    }
     Push-Location $repoRoot
     try {
         if ($Build -eq 'diag') {
-            cargo build --locked --profile diag -p victory --features diagnostics
+            Invoke-LaunchProgram $cargo.Source @('build', '--locked', '--profile', 'diag', '-p', 'victory', '--features', 'diagnostics')
         } else {
-            cargo build --locked --release -p victory
+            Invoke-LaunchProgram $cargo.Source @('build', '--locked', '--release', '-p', 'victory')
         }
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     } finally {
         Pop-Location
     }
 }
+if (-not (Test-Path -LiteralPath $victory -PathType Leaf)) {
+    Write-LaunchMessage "Build output was not found: $victory" Red
+    exit 1
+}
 
 # 3. Clean stale VICTORY_* vars from the shell (keep user path overrides).
-$keepVars = @('VICTORY_CONFIG', 'VICTORY_GAME_DIR', 'VICTORY_CACHE_DIR', 'VICTORY_DATA_DIR')
-foreach ($entry in @(Get-ChildItem Env:VICTORY_* -ErrorAction SilentlyContinue | Where-Object { $_.Name -notin $keepVars })) {
+$presetPath = Join-Path $PSScriptRoot 'rdna-preset.json'
+$preset = Get-Content -LiteralPath $presetPath -Raw | ConvertFrom-Json
+foreach ($entry in @(Get-ChildItem Env:VICTORY_* -ErrorAction SilentlyContinue | Where-Object { $_.Name -notin $preset.keep })) {
     Remove-Item "Env:$($entry.Name)"
 }
 
-# 4. Apply proven RDNA3 performance settings.
-$settings = [ordered]@{
-    VICTORY_TEXTURE_NO_WAIT     = '1'
-    VICTORY_RELAY               = '2'
-    VICTORY_WIDE_BACK           = '1'
-    VICTORY_CARD_REHASH_RUNS    = '1'
-    VICTORY_JOIN_COPIES         = '1'
-    VICTORY_INDIRECT_WINDOW     = '1'
-    VICTORY_RELAY_COPY          = '1'
-    VICTORY_CARD_STEPS          = '2'
-    VICTORY_INDIRECT_BATCH      = '2'
-    VICTORY_MAP_THREADS         = '1'
-    VICTORY_TITLE_PRIORITIES    = '0'
-    VICTORY_CARD_AWAKE          = '1'
-    VICTORY_SHOW_AFTER          = '1'
-    VICTORY_AMBIENT             = '0.8'
-    VICTORY_D3D12_DRED          = 'light'
-    VICTORY_CARD_BUFFERS_MIN_MB = '1'
-}
-
-if ($Safe) {
-    $settings['VICTORY_UNDER_WIDE'] = '0'
-    $settings['VICTORY_LAND_ECHO']  = '0'
-} else {
-    $settings['VICTORY_THIN']             = '1'
-    $settings['VICTORY_JOIN_PARTS']       = '8'
-    $settings['VICTORY_UPLOAD_AHEAD']     = '1'
-    $settings['VICTORY_PORT_CONSTANTS']   = '1'
-    $settings['VICTORY_PORT_DESCRIPTORS'] = '1'
-    $settings['VICTORY_SYNC_FINE']        = '1'
-    $settings['VICTORY_LAND_SKIP']        = '1'
+# 4. Apply RDNA3 performance settings shared with the Linux launcher.
+$settings = [ordered]@{}
+$variant = if ($Safe) { $preset.safe } else { $preset.fast }
+foreach ($entry in (@($preset.base.PSObject.Properties) + @($variant.PSObject.Properties))) {
+    $settings[$entry.Name] = $entry.Value
 }
 
 if ($RayTracing) {
@@ -131,24 +150,19 @@ foreach ($k in $settings.Keys) {
 }
 
 $mode = if ($Safe) { 'SAFE' } else { 'RDNA3 FAST' }
-Write-Host "Launching VIctory-RDNA [$mode | $Console | $Build]" -ForegroundColor Green
-Write-Host "  Binary : $victory"
-Write-Host "  Game   : $Exe"
-if ($Fps -gt 0) { Write-Host "  Target : $Fps FPS ($($settings['VICTORY_FRAME_INTERVAL_MS']) ms)" }
-if ($Log)       { Write-Host "  Log    : $Log" }
-
-if ($Log -and -not [System.IO.Path]::IsPathRooted($Log)) {
-    $Log = Join-Path (Get-Location) $Log
-}
+Write-LaunchMessage "Launching VIctory-RDNA [$mode | $Console | $Build]" Green
+Write-LaunchMessage "  Binary : $victory"
+Write-LaunchMessage "  Game   : $Exe"
+if ($Fps -gt 0) { Write-LaunchMessage "  Target : $Fps FPS ($($settings['VICTORY_FRAME_INTERVAL_MS']) ms)" }
+if ($Log) { Write-LaunchMessage "  Log    : $Log" }
 
 # Run from the game directory so relative package/RPF paths resolve cleanly.
-Push-Location $gameDir
+Push-Location -LiteralPath $gameDir
 try {
-    if ($Log) {
-        & $victory run --console $Console --execute $Exe 2>&1 | Tee-Object -FilePath $Log
-    } else {
-        & $victory run --console $Console --execute $Exe
-    }
+    Invoke-LaunchProgram $victory @('run', '--console', $Console, '--execute', $Exe)
+    $runExitCode = $LASTEXITCODE
+    Write-LaunchMessage "VIctory-RDNA exited with code $runExitCode."
 } finally {
     Pop-Location
 }
+exit $runExitCode

@@ -1,101 +1,122 @@
 # VIctory-RDNA
 
-A performance-focused, AMD RDNA-tuned fork of [VIctory](https://github.com/Marvisak/VIctory) — a Direct3D 12 compatibility layer that runs Xbox Series titles natively on Windows from user-supplied files.
+VIctory-RDNA is a Direct3D 12 compatibility layer for Xbox Series titles, tuned for AMD RDNA3 GPUs. The game launcher runs on Windows and Linux. The runtime runs directly on Windows and uses Wine on Linux. The project builds on [VIctory](https://github.com/Marvisak/VIctory) and [VIctory-7900XTX](https://github.com/avatarmanz/VIctory-7900XTX).
 
-Built directly on [avatarmanz/VIctory-7900XTX](https://github.com/avatarmanz/VIctory-7900XTX) with selective performance ports from [fxceless/victory-fork](https://github.com/fxceless/victory-fork) and a one-command launcher with tuned RDNA3 defaults out of the box.
+This is an experimental project. GTA VI is the title used for the performance measurements below. Compatibility varies by title, build, and console profile. Supply your own game files from a copy you are authorized to use and keep the executable alongside its data files.
 
-> **This repository contains no game files, code, or assets.** You must supply your own dump of the title. It is not affiliated with or endorsed by the game's developer or publisher.
+## Get started
 
----
+- **System** with an x64 AVX2-capable CPU running Windows 10/11 or desktop Linux.
+- **Desktop launcher** uses Python 3.10 or newer with Tkinter. On Windows, use the [Python installer](https://www.python.org/downloads/) with Tcl/Tk enabled. On Linux, install your distribution's Python Tk package, commonly named `python3-tk` or `python3-tkinter`.
+- **Graphics** with Direct3D 12, Shader Model 6.6, and mesh shader support for in-world rendering. The default preset is tuned for AMD RDNA3, including the RX 7900 XT and XTX. Linux needs a Wine setup with Direct3D 12 support and a compatible Vulkan driver. [VKD3D-Proton](https://github.com/HansKristian-Work/vkd3d-proton)
+- **Memory** of at least 32 GB is recommended for GTA VI, with 64 GB preferred. Available Windows commit also matters at startup.
+- **Windows build tools** if you are building from source. Install Visual Studio Build Tools with the **Desktop development with C++** workload and install Rust. Cargo uses the project's pinned toolchain. [rustup](https://rustup.rs/) · [rust-toolchain.toml](rust-toolchain.toml)
 
-## Quick Start (3 Steps)
-
-### Requirements
-- **OS:** Windows 10 / 11 x64
-- **GPU:** Direct3D 12 GPU with Shader Model 6.6 & Mesh Shaders (tuned for AMD RDNA3 — RX 7900 XT / XTX, RX 7000 series; works on other SM 6.6 GPUs too)
-- **CPU / RAM:** AVX2-capable CPU, 64 GB RAM recommended (32 GB minimum)
-- **Toolchain:** [Rust](https://rustup.rs/) + MSVC Build Tools
-
-### 1. Clone inside your game folder (or anywhere)
 ```powershell
 git clone https://github.com/XaviFortes/VIctory-RDNA.git
 cd VIctory-RDNA
 ```
 
-### 2. Launch (auto-builds on first run!)
-If `VIctory-RDNA` is inside your game folder (next to `game_scarlett_master.exe`), just double-click **`launch.bat`** or run:
-```powershell
-.\scripts\play-rdna.ps1
+1. **Open the game library.** On Windows, double-click `launch.bat`. On Linux, run `sh ./launch.sh` from the project folder.
+2. **Select a game.** On first run the launcher looks for GTA VI's `game_scarlett_master.exe` in the project folder, its parent, and the folder you started from. Use **Add game…** to select an executable elsewhere or add another title. Entries are saved for the next time you open the launcher.
+3. **Choose a console profile and click Play.** On Windows the launcher builds `victory.exe` if the selected build is missing. On Linux, supply the Windows build as described below. Use **Open last log** to see build or runtime output.
+
+### Linux setup
+
+1. Install Wine so both `wine` and `winepath` are on your `PATH`. Use an x64 Wine environment with Direct3D 12 support. Start the launcher with `WINEPREFIX` set if you use a separate prefix.
+2. Build `victory.exe` on Windows with `cargo build --locked --release -p victory`, or obtain that build from someone you trust. Copy it to `target/release/victory.exe` on Linux, or select the executable under **Advanced**. For a diagnostics build, use `target/diag/victory.exe` and choose **Diagnostics**.
+3. Run the launcher from your Linux desktop. Title execution through Wine is experimental. Compatibility depends on the Wine setup, graphics driver, and game.
+
+```sh
+WINEPREFIX="$HOME/.wine-victory" sh ./launch.sh
 ```
 
-If your game is in a different folder, pass `-Exe`:
+### Launch settings
+
+| Setting | Default | Behavior |
+| --- | --- | --- |
+| Console profile | Xbox Series X | Selects the console characteristics presented to the title, such as memory budgets. GTA VI was benchmarked with Series X. Series S may behave differently. |
+| FPS target | `0` | Uses the title's frame pacing. Set a positive target such as `60` to request a different frame interval. Actual FPS depends on performance. |
+| Safe mode | Off | Disables newer experimental renderer paths. Try it for crashes or rendering issues. |
+| Ray tracing | Off | Enables the title's ray-traced indirect lighting at a performance cost. |
+| Build profile | Release | Use **Diagnostics** to build with runtime diagnostics. |
+| Rebuild before play | Off | On Windows, runs Cargo for the selected profile before launch. |
+| Environment overrides | Empty | Under **Advanced**, enter one `VICTORY_NAME=value` per line. For example, `VICTORY_PANEL=1`. |
+
+### Logs
+
+The desktop launcher saves a fresh timestamped log for every session. Use **Logs folder** to find previous sessions. For an experiment, enter a unique filename such as `series-s-after-change.log` or browse to a full path. A filename alone goes into the Logs folder. The launcher protects existing logs and clears the custom name after starting a session so the next run gets a fresh log by default.
+
+| Platform | Launcher data folder |
+| --- | --- |
+| Windows | `%LOCALAPPDATA%\VIctory-RDNA` |
+| Linux | `${XDG_DATA_HOME:-$HOME/.local/share}/victory-rdna` |
+
+The launcher keeps `games.json` and the `logs` directory here. Title saves, `crashes.log`, and derived data are handled by the runtime. Their defaults are `%LOCALAPPDATA%\victory\data` and `%LOCALAPPDATA%\victory\cache` inside Windows or the selected Wine prefix. See [victory.example.toml](victory.example.toml) for runtime path overrides.
+
+## Launch from PowerShell on Windows
+
+From the **game folder**, with the project cloned inside it, keep using your existing command. Relative `-Log` paths are resolved from the directory you ran the command in.
+
 ```powershell
-.\scripts\play-rdna.ps1 -Exe "D:\Games\GTA6\game_scarlett_master.exe"
+.\VIctory-RDNA\scripts\play-rdna.ps1 -Log .\victory-rdna.log
+.\VIctory-RDNA\scripts\play-rdna.ps1 -Log .\after-renderer-change.log
 ```
 
-That's it — the launcher automatically builds the release binary if missing, clears stale `VICTORY_*` variables, and sets all tuned RDNA3 performance flags.
+From the **project folder**, pass `-Exe` to point to a game stored elsewhere.
 
----
-
-## Launcher Options (`scripts/play-rdna.ps1`)
-
-| Flag | Default | What it does |
-| :--- | :---: | :--- |
-| `-Exe <path>` | Auto-detected | Path to `game_scarlett_master.exe` (auto-checks `.` and `..`) |
-| `-Console <mode>` | `series-x` | Console profile: `series-x` or `series-s` |
-| `-Safe` | Off | Disables newest experimental renderer ports (`VICTORY_THIN`, `VICTORY_PORT_CONSTANTS`, `VICTORY_PORT_DESCRIPTORS`) for troubleshooting |
-| `-RayTracing` | Off | Enables ray-traced indirect lighting (`VICTORY_BVH_BUILDER=1`, ~30% slower) |
-| `-Fps <N>` | `0` (30 fps) | Unlocks frame rate target via `VICTORY_FRAME_INTERVAL_MS` (e.g. `-Fps 60`) |
-| `-Log <path>` | None | Saves full runtime output to a log file while displaying it |
-| `-Build <profile>` | `release` | `release` (fastest) or `diag` (with `diagnostics` feature) |
-| `-Rebuild` | Off | Forces a fresh `cargo build` before launching |
-| `-More @{...}` | `{}` | Pass or override any `VICTORY_*` environment variable (e.g. `-More @{VICTORY_PANEL='1'}`) |
-
-### Examples
 ```powershell
-# Standard high-FPS RDNA3 run with log capture
-.\scripts\play-rdna.ps1 -Log .\victory-rdna.log
-
-# Unlock 60 FPS cap
-.\scripts\play-rdna.ps1 -Fps 60
-
-# Troubleshooting / safe mode
-.\scripts\play-rdna.ps1 -Safe
-
-# From Command Prompt (cmd.exe)
-launch.bat -Log run.log
+.\scripts\play-rdna.ps1 -Exe "D:\Games\XboxTitle\game_scarlett_master.exe" -Console series-s -Safe -Log .\series-s-safe.log
+.\scripts\play-rdna.ps1 -Fps 60 -Build diag -Rebuild -More @{ VICTORY_PANEL = '1' } -Log .\diag-60.log
 ```
 
----
+| Parameter | Default | Purpose |
+| --- | --- | --- |
+| `-Exe <path>` | Auto-detect | Explicit title executable. Auto-detection checks the calling directory, then the project's parent and the project itself. |
+| `-Console <mode>` | `series-x` | Accepts `series-x` or `series-s`. |
+| `-Fps <N>` | `0` | Controls the target frame interval. |
+| `-Safe` / `-RayTracing` | Off | Selects the same renderer options as the desktop launcher. |
+| `-Build <profile>` | `release` | Accepts `release` or `diag`. |
+| `-Rebuild` | Off | Invokes Cargo even when the binary already exists. |
+| `-More @{...}` | Empty | Applies environment overrides after the RDNA preset. |
+| `-Log <path>` | No log file | Shows output in the terminal and writes it to the specified file. Use a different name each run to preserve earlier logs. |
 
-## What VIctory-RDNA Adds & Tunes
+From Command Prompt, `launch.bat -Log run.log` still invokes the command-line flow.
 
-On top of the full `VIctory-7900XTX` RDNA3 engine (`VICTORY_THIN` 8-thread list translation, `VICTORY_PORT_CONSTANTS` zero-copy constants heap, `VICTORY_PORT_DESCRIPTORS` patched descriptor tracking, `VICTORY_CARD_STEPS` GPU-side fills, AVX2 `safecopy`, copy-queue texture uploads, `VICTORY_AMBIENT_SETTLE` time-based indoor lighting, and `VICTORY_FRAME_INTERVAL_MS` FPS unlock):
+## RDNA3 tuning
 
-- **CPU-side `strides_shadow` & `view_addr_shadow` cache** in `descriptor/host.rs`: skips redundant uncached PCIe `write_volatile` writes on every mirrored descriptor slot.
-- **GPU-offloaded 1 MiB+ shader-write compares (`VICTORY_CARD_BUFFERS_MIN_MB=1`)** enabled by default in the launcher (moves ~76 MB/frame of CPU compares & snapshots onto the GPU).
-- **Silenced `port_descriptors` WARN spam**: caps missed-store fallback warnings to the first 10 occurrences instead of logging ~200 lines/frame on the hot path.
-- **Zero-friction launchers (`scripts/play-rdna.ps1` + `launch.bat`)**: auto-detects the executable, auto-builds on first run, and applies the full RDNA3 preset in one command.
+- A CPU-side cache for descriptor strides and view addresses skips redundant uncached PCIe writes when a mirrored slot is unchanged.
+- GPU-side comparisons for shader-write buffers of at least 1 MiB move roughly 76 MB of comparisons and snapshots per frame off the CPU in the measured workload.
+- The descriptor patch path limits missed-store fallback warnings to the first ten occurrences.
+- The launch preset also uses experimental paths from VIctory-7900XTX, including multithreaded command-list translation, zero-copy constants, descriptor tracking, GPU-side fills, AVX2 copies, and copy-queue texture uploads.
 
-### Measured Performance (RX 7900 XT, Series X profile, RT Off)
-- **Steady gameplay:** ~**13.6–18.5 FPS** (`54–73 ms/frame`)
-- **GPU settle waits (`on the GPU`):** **0.0 ms/frame**
-- **Heap buffer pass:** **6.8–9.9 ms/frame**
-- **Texture refreshes (main thread):** **0.7–1.6 ms/frame**
+### GTA VI measurements
 
----
+Recorded on an RX 7900 XT using the Series X profile with ray tracing disabled.
 
-## Credits & Upstream Projects
+| Metric | Observed |
+| --- | --- |
+| Steady gameplay | 13.6–18.5 FPS (54–73 ms/frame) |
+| GPU settle waits | 0.0 ms/frame |
+| Heap buffer pass | 6.8–9.9 ms/frame |
+| Texture refreshes on the main thread | 0.7–1.6 ms/frame |
 
-This project is a fork that builds directly on the incredible work of the VIctory community:
+## Troubleshooting
 
-- **[Marvisak/VIctory](https://github.com/Marvisak/VIctory)** — original loader, HLE runtime, Direct3D 12 backend, and shader recompiler.
-- **[avatarmanz/VIctory-7900XTX](https://github.com/avatarmanz/VIctory-7900XTX)** — the direct upstream base for this fork (RDNA3 renderer ports, `VICTORY_THIN`, `VICTORY_CARD_STEPS`, AVX2 `safecopy`, time-based ambient settle, FPS unlock).
-- **[fxceless/victory-fork](https://github.com/fxceless/victory-fork)** — upstream optimizations and community PRs.
-- **[DexNom/VIctory](https://github.com/DexNom/VIctory)**, **[Belobug/VIctory-Belobug-AMD](https://github.com/Belobug/VIctory-Belobug-AMD)**, **[FQY55kai/ZJOU-VICTORY](https://github.com/FQY55kai/ZJOU-VICTORY)**, **[myokex/victory-amd](https://github.com/myokex/victory-amd)**, **Geckomacabre**, and **cxy0072019-sketch**.
+- **Build failed.** Open the session log and look for the first Cargo or linker error. Check that Rust and the MSVC C++ Build Tools are installed, then reopen the launcher.
+- **Wine launch failed.** Open the session log and check whether it found `wine`, `winepath`, and your Windows build. Check the Wine prefix's Direct3D 12 support if the runtime reports a graphics initialization error.
+- **Title closes or renders incorrectly.** Try Series X with **Safe mode** enabled, **Ray tracing** disabled, and the FPS target set to `0`. Check the session log and the runtime's `crashes.log` for details.
+- **Windows error 1455.** Check **Task Manager → Performance → Memory → Committed**. Free memory or increase the Windows paging file, then retry.
 
-For full upstream technical notes and environment switch references, see [docs/README-fxceless.md](docs/README-fxceless.md) and [docs/findings.md](docs/findings.md).
+For command references, input mappings, and renderer notes, see [the upstream documentation](docs/README-fxceless.md) and [the technical findings](docs/findings.md).
+
+## Credits
+
+- **Marvisak / VIctory** for the original loader, HLE runtime, Direct3D 12 backend, and shader recompiler. [VIctory](https://github.com/Marvisak/VIctory)
+- **avatarmanz / VIctory-7900XTX** for the direct upstream base and RDNA3 renderer work. [VIctory-7900XTX](https://github.com/avatarmanz/VIctory-7900XTX)
+- **fxceless / victory-fork** for upstream optimizations and community contributions. [victory-fork](https://github.com/fxceless/victory-fork)
+- **DexNom**, **Belobug**, **FQY55kai**, **myokex**, **Geckomacabre**, and **cxy0072019-sketch**. [DexNom](https://github.com/DexNom/VIctory) · [Belobug](https://github.com/Belobug/VIctory-Belobug-AMD) · [FQY55kai](https://github.com/FQY55kai/ZJOU-VICTORY) · [myokex](https://github.com/myokex/victory-amd)
 
 ## License
 
-GPL-3.0-or-later, as VIctory. See [LICENSE](LICENSE).
+GPL-3.0-or-later. See [LICENSE](LICENSE) and the [asset policy](docs/asset-policy.md).
