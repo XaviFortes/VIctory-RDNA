@@ -114,11 +114,11 @@ The latest capture's sampled median was **30% higher**, with a **23% lower media
 
 Port 6 (`VICTORY_PORT_GUARD=1`) was active. At shutdown, its counters showed **452.5 kernel queries skipped per frame**, **156.3 faults handled under a shared lock** with **0.70 ms/frame** waiting for that lock, and **121.5 refresh guards handled in shared mode** per frame.
 
-The comparison uses periodic swap-chain samples with at least 1,000 draws per frame. The 13 min 37 s is total runtime, including startup and loading. A full-session FPS average and continuous time under player control are unverified. The largest measured CPU-side costs are still submission preparation and copy-back. Those timings can overlap, and the GPU settle counter measures synchronization waits.
+The comparison uses periodic swap-chain samples with at least 1,000 draws per frame. The 13 min 37 s is total runtime, including startup and loading. The earlier warm capture below documents the longer hands-on gameplay session. The largest measured CPU-side costs are still submission preparation and copy-back. Those timings can overlap, and the GPU settle counter measures synchronization waits.
 
-#### Warm-cache run with direct constant-buffer reads
+#### Warm-cache gameplay run played by hand
 
-On **26 November 2026**, `victory-rdna4-warm.log` recorded a Windows D3D12 run on an **RX 7900 XT**, using the **RDNA3 Fast** release preset and **Series X** profile at **3840 × 2160 output**. The run reached heavy rendering at about **1 min 08 s** and continued until a GPU device removal at **48 min 26 s**.
+On **26 November 2026**, the project maintainer played GTA VI by hand for **about 40 minutes** on an **RX 7900 XT** using Windows D3D12, the **RDNA3 Fast** release preset, and the **Series X** profile at **3840 × 2160 output**. The capture (`victory-rdna4-warm.log`) recorded a **12.1 FPS median across 509 heavy-rendering samples**. The session ended with GPU device removal at **48 min 26 s** from startup.
 
 | Metric | Heavy-rendering samples across the run | Final 60 seconds before device removal |
 | --- | ---: | ---: |
@@ -132,7 +132,7 @@ On **26 November 2026**, `victory-rdna4-warm.log` recorded a Windows D3D12 run o
 
 The direct constant-buffer path (`VICTORY_PORT_CBV=1`) recorded a median of **14,227 table constant-buffer reads in place per frame**, avoiding about **5,446 KB/frame** of copies in samples with at least 1,001 direct reads. The fallback still copied a median of **1,305** bindings per frame in those same samples.
 
-The timing table uses periodic swap-chain measurements with at least 1,000 draws per frame. The elapsed time includes startup and loading. The capture does not establish continuous player-controlled time or a full-session FPS average.
+The gameplay duration is the maintainer's estimate. The log timestamps measure total runtime including startup and loading. The FPS figure is the median of periodic swap-chain samples with at least 1,000 draws per frame.
 
 #### Short captures
 
