@@ -2892,6 +2892,7 @@ impl HostHeap {
     /// returned).
     ///
     /// [`dynamic`]: HostHeap::dynamic
+    #[cfg(test)]
     pub(crate) fn release(&self, first: u32, n: u32) {
         self.release_many(&[(first, n)]);
     }
