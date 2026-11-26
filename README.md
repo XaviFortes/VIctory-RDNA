@@ -4,7 +4,7 @@ VIctory-RDNA is a Direct3D 12 compatibility layer for Xbox Series titles, tuned 
 
 This is an experimental project. GTA VI is the title used for the performance measurements below. Compatibility varies by title, build, and console profile. Supply your own game files from a copy you are authorized to use and keep the executable alongside its data files.
 
-On an RX 7900 XT, a warm-cache GTA VI run lasted **48 min 26 s from startup to GPU device removal**. Across 509 heavy-rendering samples it recorded a **12.1 FPS median** at 4K output. Two shorter captures ended cleanly, with final-minute sample medians of **13.6 FPS** and **12.9 FPS**. [GTA VI measurements](#gta-vi-measurements)
+The latest GTA VI capture on an **RX 7900 XT** recorded a **15.75 FPS median across 134 heavy-rendering samples** at **4K output** in Series X mode. It reached **19.7 FPS at 50.8 ms/frame** in two samples with more than 4,000 draws per frame and exited cleanly after **13 min 37 s**. [GTA VI measurements](#gta-vi-measurements)
 
 ## Get started
 
@@ -94,6 +94,27 @@ From Command Prompt, `launch.bat -Log run.log` still invokes the command-line fl
 - The launch preset also uses experimental paths from VIctory-7900XTX, including multithreaded command-list translation, zero-copy constants, descriptor tracking, GPU-side fills, AVX2 copies, and copy-queue texture uploads.
 
 ### GTA VI measurements
+
+#### Latest Series X capture
+
+`victory-rdna5.log` records a **26 November 2026** Windows D3D12 release run on an **RX 7900 XT**, using the RDNA3 Fast preset and a **3840 × 2160 presentation surface**. Heavy rendering first appeared at **1 min 57 s**. The run ended through the normal window-close path with **exit code 0**.
+
+| Median across heavy-rendering samples | Earlier warm run | Latest run |
+| --- | ---: | ---: |
+| Samples | 509 | 134 |
+| Rendered FPS | 12.1 | **15.75** |
+| Frame time | 82.9 ms | **63.6 ms** |
+| Submission preparation | 57.9 ms | 45.35 ms |
+| Copy preparation | 24.3 ms (73.3 MB/frame) | 15.8 ms (53.75 MB/frame) |
+| Heap-buffer pass | 12.9 ms | 11.15 ms |
+| Copy-back | 22.3 ms | 20.85 ms |
+| GPU settle waits | 0.0 ms | 0.0 ms |
+
+The latest capture's sampled median was **30% higher**, with a **23% lower median frame time**. The runs covered different durations and workloads, so these figures describe the two captures. In the latest run's final minute, the heap-buffer pass was **8.55 ms** at the median and GPU settle waits were **0.4 ms** at the median. The two **19.7 FPS** samples came at **4,073** and **4,371** draws per frame. A lighter sample reached **24.9 FPS** at **1,415** draws per frame.
+
+Port 6 (`VICTORY_PORT_GUARD=1`) was active. At shutdown, its counters showed **452.5 kernel queries skipped per frame**, **156.3 faults handled under a shared lock** with **0.70 ms/frame** waiting for that lock, and **121.5 refresh guards handled in shared mode** per frame.
+
+The comparison uses periodic swap-chain samples with at least 1,000 draws per frame. The 13 min 37 s is total runtime, including startup and loading. A full-session FPS average and continuous time under player control are unverified. The largest measured CPU-side costs are still submission preparation and copy-back. Those timings can overlap, and the GPU settle counter measures synchronization waits.
 
 #### Warm-cache run with direct constant-buffer reads
 
@@ -197,7 +218,7 @@ The memory figures are D3D12 budget snapshots. Texture upload volume is cumulati
 
 ## Known problems
 
-- **Long-session GPU device removal.** The warm run ended with `DXGI_ERROR_INVALID_CALL` (`0x887A0001`) while submissions were queued ahead. The final sample was **6.0 FPS at 167.6 ms/frame**, with **42.5 ms** in the heap-buffer pass and **21.5 ms** in GPU settle waits. The runtime recorded large resource sweeps in the last minute, including one that released about **1.13 GiB** of host window copies. The log does not identify the invalid call or establish that memory pressure caused it.
+- **Long-session stability.** The earlier warm run ended with `DXGI_ERROR_INVALID_CALL` (`0x887A0001`) after **48 min 26 s**. The final sample was **6.0 FPS at 167.6 ms/frame**, with **42.5 ms** in the heap-buffer pass and **21.5 ms** in GPU settle waits. The runtime recorded large resource sweeps before the failure. The cause remains unverified, and the latest clean run was shorter.
 - **Rendering gaps.** Missing host pipelines can drop draws, and the texture path still reports refresh warnings.
 
 These are two separate follow-up tests for the warm run. Their effect on frame rate and stability has yet to be measured.
