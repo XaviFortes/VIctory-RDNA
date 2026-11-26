@@ -6,12 +6,12 @@
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Platform: Windows & Linux](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20(Wine)-0078D6.svg)](#quick-start)
-[![GPU: AMD RDNA3](https://img.shields.io/badge/Tuned%20For-AMD%20RDNA3%20(D3D12)-ED1C24.svg)](#what-makes-victory-rdna-fast)
+[![GPU: AMD RDNA3 / RDNA4](https://img.shields.io/badge/Tuned%20For-AMD%20RDNA3%20%2F%20RDNA4%20(D3D12)-ED1C24.svg)](#what-makes-victory-rdna-fast)
 [![Series X 4K: 23.1 FPS Median](https://img.shields.io/badge/GTA%20VI%204K%20Series%20X-23.1%20FPS%20Median%20%7C%2029.3%20Peak-2EA44F.svg)](#benchmarks)
 
 *Standing on the shoulders of [VIctory](https://github.com/Marvisak/VIctory) and [VIctory-7900XTX](https://github.com/avatarmanz/VIctory-7900XTX) — pushed to nearly **2× baseline performance** with zero resolution hacks and a 1-click desktop launcher.*
 
-[Why VIctory-RDNA](#-what-makes-victory-rdna-fast) · [Benchmarks](#-benchmarks) · [Quick Start](#-quick-start) · [PowerShell CLI](#-powershell-cli-windows) · [Known Limits](#-honest-status--known-limitations) · [Contribute](#-contribute) · [Credits](#-credits)
+[Why VIctory-RDNA](#-what-makes-victory-rdna-fast) · [Benchmarks](#-benchmarks) · [Quick Start](#-quick-start) · [PowerShell CLI](#-powershell-cli-windows) · [Picture & Status](#-visual-quality-honest-status--known-limitations) · [Contribute](#-contribute) · [Credits](#-credits)
 
 </div>
 
@@ -53,6 +53,8 @@ Tested on **Windows 11 · AMD Radeon RX 7900 XT (20 GB, ReBAR) · Direct3D 12** 
   A lock-free `AtomicBool` fast path + merged `RwLock` eliminates ~17,400+ mutex lock/unlock cycles per frame in `Shadow::nothing_new`, backed by AVX2-vectorized `word_runs` and 256 KiB parallel work chunks.
 - **Parallel Texture Readbacks & Single-Pass Journal Sync**
   Parallelizes `texback::land_many` across worker threads with thread-local scratch buffers and per-flight water-readback dedup (`read-backs and lists`: `11–23 ms → 3.2 ms`), and unifies Port 7 `ask_once()` into a single parallel pass (`-35%` exclusive journal locks).
+- **RDNA4 (RX 9070 XT), FSR 4.1.2 & Flicker Fixes**
+  Includes upstream submission-prelude texture uploads, batched indirect-argument ordering (`VICTORY_PORT_CONSTANTS_ORDER_ALONE=0`) to reduce foliage/lamp flicker without sacrificing frame rate, **RX 9070 XT (RDNA4)** fixes & upgraded live HUD (`VICTORY_PANEL=1`), **PC FidelityFX FSR 4.1.2 (`-Fsr4K`)**, and Renderer Port RT groundwork (`VICTORY_PORT_RT=1`, `VICTORY_AMBIENT_RT`).
 - **1-Click Desktop Game Library (Windows & Linux)**
   No manually pasting 20 environment variables. Double-click `launch.bat` (or `sh ./launch.sh`), pick your game, choose Series X or Series S, and click **Play**.
 
@@ -207,14 +209,21 @@ Prefer scripting, benchmarking, or custom overrides? Use `scripts/play-rdna.ps1`
 
 ---
 
-## 🔍 Honest Status & Known Limitations
+## 🔍 Visual Quality, Honest Status & Known Limitations
 
-We believe in transparent benchmarks and honest status reporting:
+We believe in transparent benchmarks and honest visual/stability reporting:
 
-- **In-Game (Stage 6):** Boots into full playable 3D open-world gameplay on GTA VI. Earlier warm-cache sessions ran **~40 minutes of hands-on gameplay** (`48 min 26 s` total), and recent `rdna14`–`rdna18` builds exit cleanly with `code 0`.
-- **Visual Gaps:** In-world rendering is playable, but some draws are still dropped for missing host pipelines and the texture path logs refresh warnings.
-- **Long-Session GPU Resets:** While recent captures (`rdna11`–`rdna18`) exited cleanly, earlier extended runs encountered `DXGI_ERROR_INVALID_CALL` (`0x887A0001`) or a one-off `DXGI_ERROR_DEVICE_HUNG` (`0x887A0006`). Hardening multi-hour stability is an ongoing priority.
-- **Single-Machine Measurements:** The numbers above were captured on one RX 7900 XT system across live gameplay windows (not a locked deterministic replay). Community benchmarks on other RDNA2/RDNA3/NVIDIA GPUs are very welcome!
+### Picture Quality (Maintainer Visual Assessment · Series X 4K)
+- **Overall Picture:** Coherent lighting, natural color reproduction, and clean, readable world geometry, characters, and interiors at native **Xbox Series X 4K output (`3840 × 2160`)**.
+- **Minor Visual Artifacts:**
+  - **LOD & Texture Streaming Pop-In:** Some models and textures briefly appear at lower detail (**LOD pop-in** / **texture-streaming mipmap pop-in**) for a moment while higher-detail assets stream in.
+  - **Distant Vegetation Flicker:** Occasional flickering can still appear on distant trees and foliage.
+  - **Missing Host Pipelines:** A small number of draws are still dropped where host pipelines are not yet implemented, and the texture path logs refresh warnings.
+
+### Playability & Stability
+- **In-Game (Stage 6):** Boots into full playable 3D open-world gameplay on GTA VI. Earlier warm-cache builds ran **~40 minutes of hands-on gameplay** (`48 min 26 s` total), and recent `rdna14`–`rdna19` captures all exited cleanly with **`code 0`** (including the `9 min 38 s` `rdna18` benchmark). A dedicated **30+ minute hands-on Series X 4K playthrough** on the current fast build is next to confirm extended hands-on stability.
+- **Long-Session GPU Resets:** While recent captures (`rdna11`–`rdna19`) exited cleanly, earlier extended runs encountered `DXGI_ERROR_INVALID_CALL` (`0x887A0001`) or a one-off `DXGI_ERROR_DEVICE_HUNG` (`0x887A0006`). Hardening multi-hour stability remains an ongoing priority.
+- **Single-Machine Measurements:** The numbers above were captured on one RX 7900 XT system across live gameplay windows (not a locked deterministic replay). Community benchmarks on other RDNA2/RDNA3/RDNA4/NVIDIA GPUs are very welcome!
 
 <details>
 <summary><strong>Troubleshooting Quick Fixes</strong></summary>
