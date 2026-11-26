@@ -4,7 +4,7 @@ VIctory-RDNA is a Direct3D 12 compatibility layer for Xbox Series titles, tuned 
 
 This is an experimental project. GTA VI is the title used for the performance measurements below. Compatibility varies by title, build, and console profile. Supply your own game files from a copy you are authorized to use and keep the executable alongside its data files.
 
-**21.9 FPS at 4K output in Series X mode** on an **AMD Radeon RX 7900 XT**, at **45.6 ms/frame** in the latest capture. The build exited cleanly. An earlier build logged a hands-on session of about **40 minutes**. [GTA VI status](#gta-vi-status) · [Benchmarks](#gta-vi-measurements) · [Contribute](#contribute)
+**23.2 FPS at 4K output in Series X mode** on an **AMD Radeon RX 7900 XT**, at **43.0 ms/frame** with **4,083 draws/frame**. The latest in-place buffer experiment recorded an **18.75 FPS sampled median in its final minute** and exited cleanly. An earlier build logged about **40 minutes of hands-on gameplay**. [GTA VI status](#gta-vi-status) · [Benchmarks](#gta-vi-measurements) · [Contribute](#contribute)
 
 ## GTA VI status
 
@@ -13,8 +13,8 @@ This is an experimental project. GTA VI is the title used for the performance me
 | Tested on | Windows, AMD Radeon RX 7900 XT, Direct3D 12. Xbox Series X profile with 3840 × 2160 presentation output. |
 | Stage | **In-game (stage 6)**. The maintainer played the earlier warm-cache build by hand. |
 | Picture | In-world rendering with known gaps. The latest log shows draws dropped for missing host pipelines and texture refresh warnings. A visual rating still needs a scene-by-scene check. |
-| Speed | **12.1 FPS sampled median** during the earlier hands-on run. The latest capture reached **21.9 FPS (45.6 ms/frame)**, with a **17.9 FPS sampled median in its final minute**. |
-| Stability | **About 40 minutes of hands-on gameplay** on the earlier warm build, which hit GPU device removal at **48 min 26 s** from startup. The earlier `rdna5` capture exited cleanly after **13 min 37 s** total. The latest capture exited cleanly after **5 min 52 s** total. |
+| Speed | Latest Series X capture peaked at **23.2 FPS (43.0 ms/frame)** and recorded an **18.75 FPS sampled median in its final minute**. The earlier hands-on run had a **12.1 FPS sampled median**. |
+| Stability | **About 40 minutes of hands-on gameplay** on the earlier warm build, which hit GPU device removal at **48 min 26 s** from startup. The earlier `rdna5` capture exited cleanly after **13 min 37 s** total. The latest `rdna17` capture exited cleanly after **4 min 46 s** total. |
 
 These are measurements from one machine. The hands-on duration is the maintainer's estimate. The **12.1 FPS** figure comes from 509 periodic samples at 1,000 or more draws per frame, which can include cutscenes and transitions. Total runtime includes startup and loading. Output resolution describes the presentation surface.
 
@@ -107,34 +107,43 @@ From Command Prompt, `launch.bat -Log run.log` still invokes the command-line fl
 
 ### GTA VI measurements
 
-#### Series X at 4K output · 26 November 2026
+#### In-place buffer experiments · 26 November 2026
 
-Two Windows release captures on the RX 7900 XT compare `rdna11` with `rdna12` ([`5663897`](https://github.com/XaviFortes/VIctory-RDNA/commit/5663897)). Both exited with code 0. The FPS and preparation ranges below summarize the final 60 seconds before window close. The submission, descriptor and lock counters show the final two readings in each capture.
+Four Windows release captures on the **RX 7900 XT** used **Series X** with **3840 × 2160 output**. All four exited with code 0. These runs use different gameplay windows. The table compares the final minute of each capture, using the same sampling rule for all four.
 
-| Metric | `rdna11` | `rdna12` |
-| --- | ---: | ---: |
-| Total runtime, clean exit | 6 min 32 s | 5 min 52 s |
-| FPS samples in final minute | 11 | 12 |
-| FPS range | 15.9–19.2 | **15.1–21.9** |
-| Median FPS | 17.2 | **17.9** |
-| Median frame time | 58.1 ms | **56.0 ms** |
-| Submission preparation | 43.0–50.9 ms/frame | **36.8–44.0 ms/frame** |
-| Copy preparation | 14.5–20.3 ms/frame | **11.7–15.4 ms/frame** |
-| Submitting thread work | 45.2–47.0 ms/frame | **44.4–46.0 ms/frame** |
-| Title wait at present | 10.5–11.6 ms/frame | **9.9–11.9 ms/frame** |
-| Descriptor-sync wait | 0.27–2.00 ms/frame | **0.41–0.76 ms/frame** |
-| Heap-buffer pass, final reading | 11.9 ms/frame | **8.1 ms/frame** |
-| Port 7 needless exclusive lock acquisitions | 45.0–45.6/frame | **18.4–18.8/frame** |
-| Samples with zero GPU settle wait | 10 of 11 | **11 of 12** |
+| Final-minute metric | `rdna14` baseline | `rdna15` broad buffer placement | `rdna16` selective placement | `rdna17` GPU copy/fill fix |
+| --- | ---: | ---: | ---: | ---: |
+| Samples | 12 | 12 | 11 | 12 |
+| Sampled median FPS | 17.3 | 14.85 | 15.9 | **18.75** |
+| Sampled median frame time | 57.9 ms | 67.4 ms | 62.8 ms | **53.4 ms** |
+| FPS range | 12.5–20.2 | 8.7–18.4 | 13.1–21.6 | **14.6–21.7** |
+| CPU submission preparation | 39.4–51.5 ms | 32.5–40.3 ms | 33.8–43.9 ms | **30.4–39.6 ms** |
+| CPU copy preparation | 12.6–20.5 ms | 10.4–15.6 ms | 10.4–15.1 ms | **9.0–13.5 ms** |
+| Median copy preparation traffic | 47.5 MB/frame | 36.15 MB/frame | 36.1 MB/frame | 36.65 MB/frame |
+| Samples reporting 0.0 ms of GPU settle waits | 11 of 12 | 8 of 12 | 0 of 11 | **11 of 12** |
+| Total runtime, clean exit | 7 min 30 s | 4 min 48 s | 5 min 17 s | 4 min 46 s |
 
-The final-minute peak rose by **2.7 FPS**. The `rdna12` peak of **21.9 FPS** was recorded twice during the run, at **1,498** and **3,811** draws per frame. At **4,000 or more draws per frame**, the whole-capture sampled medians were **17.2 FPS** across 28 samples in `rdna11` and **16.7 FPS** across eight samples in `rdna12`. Workload varies across the captures.
+Across the entire `rdna17` capture, samples with **4,000 or more draws per frame** had an **18.7 FPS median** (18 samples) and peaked at **23.2 FPS at 43.0 ms/frame** with **4,083 draws/frame**. The equivalent `rdna14` subset had a **15.85 FPS median** (26 samples). These are periodic swap-chain samples. A same-scene comparison and a full-session gameplay average are still open.
 
-The FPS counter measures frames accepted by the swap chain in periodic windows. These captures provide sampled medians and peaks. A sustained 20 FPS gameplay average remains to be demonstrated.
+#### Why lower CPU costs did not immediately raise FPS
 
-#### Renderer profiling
+1. **Broad placement traded CPU work for GPU memory access.** With `VICTORY_PORT_BUFFERS=1`, `rdna15` reported **124 contiguous regions in place (561 MB)** and a final card-copy reading of **12.0 MB sent / 31.4 MB fetched per frame**, down from **18.6 / 48.9 MB** in `rdna14`. CPU preparation fell, while median frame time rose. The placement policy let large, frequently accessed buffers move from local VRAM to GPU-accessible system memory. That explains the direction of the result, though these captures cannot isolate the PCIe cost. Commit [`4487275`](https://github.com/XaviFortes/VIctory-RDNA/commit/4487275) keeps buffers classified as large at title addresses above 4 GiB in local VRAM.
+2. **Selective placement removed most CPU comparisons.** With the guard and `VICTORY_INPLACE=2`, `rdna16` reported **842 MB in place** across 3,345 private buffers, 91 windows, and 97 buffers and windows on the contiguous-section path. Final CPU shader-write comparisons dropped from **28.4 MB across 370 ranges** to **0.6 MB in one range**. The final copied constant-buffer count dropped from **1,528 to 510 per frame**. Title-memory reads still triggered GPU settles, reaching **9.1 ms/frame** in the final minute.
+3. **GPU copies and fills removed most of those waits.** Commit [`5e6fec2`](https://github.com/XaviFortes/VIctory-RDNA/commit/5e6fec2) allows card-side copies and fills to use in-place buffers. In `rdna17`, settle waits read **0.0 ms** in 11 of the final 12 samples, with one **0.3 ms** reading. The last submitting-thread reading fell from **47.4 ms** in `rdna16` to **40.7 ms** in `rdna17`.
 
-- **Port 7 journal.** The `ask_once_active` fast path cuts needless exclusive lock acquisitions by about **59%** in the final two readings. Those readings still show **92–112 waits for a journal part per frame**, or **4.84–6.34 ms/frame** summed across threads. Inspect page-to-part distribution before changing the number of parts. [Write-watch and journal code](crates/victory-gpu/src/watch.rs)
-- **Submission costs.** Copy preparation reached **11.7–15.4 ms/frame** in the final minute, with a median of **43.5 MB/frame** in copy traffic. Copy-back had a median of **19.0 ms/frame**. Profile page-protection calls, write-watch queries, snapshots, and card copies to identify work still on the submitting thread. These counters can overlap. [Submission timing](crates/victory-gpu/src/host.rs) · [Shadow copies](crates/victory-gpu/src/shadow.rs)
+#### Remaining bottlenecks and reproduction
+
+A **21.0 FPS** sample in `rdna17` took **47.7 ms/frame**. The queue meter recorded **13.4 ms** without this layer's work queued, including **11.8 ms** while the submitting thread was active. Subtracting the idle interval leaves an estimated **34.3 ms** of queue-busy time. The meter gives an estimate of queue activity. Direct GPU timing and a controlled run would be needed to establish a rendering ceiling.
+
+The final readings show **13.8 joined submissions per frame** in `rdna17` versus **20.3** in `rdna14`, while total submissions stayed near 37. A same-scene trace can test whether the smaller batches explain the remaining gap. The in-place options are opt-in. Series S at a 60 FPS target is a follow-up test with performance still to be measured.
+
+```powershell
+# From the game folder, rebuild and capture the Series X comparison.
+.\VIctory-RDNA\scripts\play-rdna.ps1 -Rebuild -Log .\series-x-inplace.log -More @{ VICTORY_PORT_BUFFERS = '1'; VICTORY_INPLACE = '2' }
+
+# Try the same build in Series S mode and request a 60 FPS target.
+.\VIctory-RDNA\scripts\play-rdna.ps1 -Console series-s -Fps 60 -Log .\series-s-inplace.log -More @{ VICTORY_PORT_BUFFERS = '1'; VICTORY_INPLACE = '2' }
+```
 
 ## Known problems
 
@@ -152,7 +161,7 @@ For command references, input mappings, and renderer notes, see [the upstream do
 
 ## Contribute
 
-Help reproduce the **21.9 FPS Series X result**, document picture quality in a specific scene, or isolate the long-session GPU failure. Useful contributions include a 10-minute hands-on benchmark, a same-scene before-and-after trace for a renderer change, or a diagnostics log that points to the command preceding device removal.
+Help reproduce the **23.2 FPS Series X result**, document picture quality in a specific scene, or isolate the long-session GPU failure. Useful contributions include a 10-minute hands-on benchmark, a same-scene before-and-after trace for a renderer change, or a diagnostics log that points to the command preceding device removal.
 
 Include the tested commit, GPU and driver, console profile, output resolution, scene, and time under player control. Report average rendered FPS when available and describe how the run ended. Open an issue or pull request with a short summary and your own measurements. Keep game files out of submissions. [GitHub repository](https://github.com/XaviFortes/VIctory-RDNA)
 
