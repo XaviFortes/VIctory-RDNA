@@ -27,6 +27,8 @@ param(
     [switch]$Safe,
     [switch]$RayTracing,
     [int]$Fps = 0,
+    [string]$Output = '',
+    [double]$Scale = 0,
     [string]$Log = '',
     [ValidateSet('release', 'diag')][string]$Build = 'release',
     [switch]$Rebuild,
@@ -139,6 +141,23 @@ if ($RayTracing) {
 if ($Fps -gt 0) {
     $interval = [math]::Round(1000.0 / $Fps, 3)
     $settings['VICTORY_FRAME_INTERVAL_MS'] = $interval.ToString([System.Globalization.CultureInfo]::InvariantCulture)
+}
+
+if ($Output) {
+    $resolvedOutput = switch ($Output.ToLowerInvariant()) {
+        '720p'  { '1280x720' }
+        '936p'  { '1664x936' }
+        '1080p' { '1920x1080' }
+        '1440p' { '2560x1440' }
+        '4k'    { '3840x2160' }
+        '2160p' { '3840x2160' }
+        default { $Output }
+    }
+    $settings['VICTORY_OUTPUT'] = $resolvedOutput
+}
+
+if ($Scale -gt 0) {
+    $settings['VICTORY_RENDER_SCALE'] = $Scale.ToString([System.Globalization.CultureInfo]::InvariantCulture)
 }
 
 foreach ($k in $More.Keys) {

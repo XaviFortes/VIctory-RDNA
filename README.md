@@ -4,6 +4,8 @@ VIctory-RDNA is a Direct3D 12 compatibility layer for Xbox Series titles, tuned 
 
 This is an experimental project. GTA VI is the title used for the performance measurements below. Compatibility varies by title, build, and console profile. Supply your own game files from a copy you are authorized to use and keep the executable alongside its data files.
 
+On an RX 7900 XT, the final minute of two GTA VI runs had median sampled rates of **13.6 FPS** and **12.9 FPS**. Both sessions ended cleanly after just over four minutes. [GTA VI measurements](#gta-vi-measurements)
+
 ## Get started
 
 - **System** with an x64 AVX2-capable CPU running Windows 10/11 or desktop Linux.
@@ -86,20 +88,91 @@ From Command Prompt, `launch.bat -Log run.log` still invokes the command-line fl
 ## RDNA3 tuning
 
 - A CPU-side cache for descriptor strides and view addresses skips redundant uncached PCIe writes when a mirrored slot is unchanged.
-- GPU-side comparisons for shader-write buffers of at least 1 MiB move roughly 76 MB of comparisons and snapshots per frame off the CPU in the measured workload.
+- GPU-side comparisons for shader-write buffers of at least 1 MiB reduce the amount of data the CPU has to compare and snapshot.
 - The descriptor patch path limits missed-store fallback warnings to the first ten occurrences.
 - The launch preset also uses experimental paths from VIctory-7900XTX, including multithreaded command-list translation, zero-copy constants, descriptor tracking, GPU-side fills, AVX2 copies, and copy-queue texture uploads.
 
 ### GTA VI measurements
 
-Recorded on an RX 7900 XT using the Series X profile with ray tracing disabled.
+Two local captures from **26 November 2026** on Windows D3D12 with an **AMD Radeon RX 7900 XT**. Both used the **RDNA3 Fast** release preset, **Xbox Series X**, the title's **33.333 ms** frame interval, SDR, and a **3840 × 2160 presentation surface**. That is the output size reported by the swap chain. The logs do not report the internal render resolution. The fast preset leaves ray tracing off by default.
 
-| Metric | Observed |
-| --- | --- |
-| Steady gameplay | 13.6–18.5 FPS (54–73 ms/frame) |
-| GPU settle waits | 0.0 ms/frame |
-| Heap buffer pass | 6.8–9.9 ms/frame |
-| Texture refreshes on the main thread | 0.7–1.6 ms/frame |
+| Session | `victory-rdna2.log` | `victory-rdna3.log` |
+| --- | ---: | ---: |
+| First presentation surface logged | 0.99 s | 1.00 s |
+| Total logged runtime, including startup and loading | 4 min 20 s | 4 min 11 s |
+| Median FPS before sustained high draw counts | 30.0 | 30.0 |
+| First sample at 1,000+ draws/frame | 1 min 26 s | 56 s |
+| Samples at 1,000+ draws/frame | 34 | 37 |
+| Median FPS at 1,000+ draws/frame | 13.05 | 12.5 |
+| FPS range at 1,000+ draws/frame | 6.3–17.7 | 0.2–19.3 |
+| Median frame time at 1,000+ draws/frame | 76.6 ms | 80.1 ms |
+| 90th-percentile sampled frame time at 1,000+ draws/frame | 119.8 ms | 155.7 ms |
+| Samples at 10 FPS or higher within that range | 29 of 34 | 26 of 37 |
+| Final 60 s median FPS | **13.6** | **12.9** |
+| Final 60 s FPS range | 10.9–16.1 | 10.2–15.8 |
+| Final 60 s median frame time | **73.4 ms** | **77.5 ms** |
+| Final 60 s frame-time range | 62.0–92.1 ms | 63.4–97.7 ms |
+| Shutdown | Window closed, exit code 0 | Window closed, exit code 0 |
+
+The second capture reached **19.3 FPS at 51.9 ms/frame** in one sample. It also had samples at **4,625.2 ms/frame** and **1,131.3 ms/frame** after the draw count increased. Both captures ended via the window-close path, with no ERROR-level messages or GPU device loss reported. The four-minute runtimes include startup and loading, and continuous time under player control was not annotated.
+
+**How to read these numbers.** The runtime counts frames accepted by the swap chain. The FPS and frame-time lines appear about every five seconds, with each line summarizing the latest measurement window of at least one second. The medians, ranges, and percentile above use those sampled windows. The logs do not contain individual frame times, so they cannot provide a session-wide FPS average or 1% lows. The 1,000-draw threshold helps separate heavy rendering from startup and menus and can include cutscenes and transitions. The final-minute rows include all samples logged during the 60 seconds before the window closed (12 in the first capture and 11 in the second).
+
+Both runs report the same title executable fingerprint and load an existing pipeline cache. The capture names identify sessions on the same GPU. The logs do not identify the VIctory-RDNA commit or the route played in each run, so differences between the captures cannot be assigned to a particular change.
+
+<details>
+<summary>Renderer timings, memory and diagnostics</summary>
+
+The tables below show the median per-frame value in the final 60 seconds unless a row says otherwise. Timings on different threads and queues overlap. The all-thread rows sum worker time.
+
+| Renderer timing | `victory-rdna2.log` | `victory-rdna3.log` |
+| --- | ---: | ---: |
+| Preparing submissions | 60.8 ms | 59.1 ms |
+| Copy preparation | 23.9 ms | 21.7 ms |
+| Heap buffer pass | 19.4 ms | 13.9 ms |
+| Texture work during submission preparation | 1.6 ms | 1.9 ms |
+| Texture refreshes across all threads | 12.7 ms | 13.4 ms |
+| Copy-back | 34.6 ms | 32.6 ms |
+| Merging fetched data | 18.7 ms | 18.2 ms |
+| Asynchronous submission thread work | 64.3 ms | 62.3 ms |
+| Title-side waits at presents | 10.7 ms | 19.0 ms |
+| GPU settle waits | 0.15 ms | 0.0 ms |
+| Additional card-memory waits | 11.4 ms | 10.0 ms |
+| Time without this layer's work queued on the GPU | 26.4 ms | 31.5 ms |
+| GPU busy estimate from queue timing | 63.5% | 58% |
+| Command-list translation across all workers | 349.2 ms | 397.1 ms |
+
+The second capture had a lower median heap-buffer pass time and shorter copy preparation, while present waits and median frame time were higher. The GPU busy estimate comes from the runtime's queue timing. The settle counter measures wait time at a specific synchronization point.
+
+| Rendering and data movement | `victory-rdna2.log` | `victory-rdna3.log` |
+| --- | ---: | ---: |
+| Draws per frame | 5,433 | 5,625 |
+| Draws dropped per frame for missing host pipelines | 416 | 425 |
+| Indirect drops reported per frame | 0 | 0 |
+| Asynchronous submissions per frame | 28.7 | 27.6 |
+| Command-list calls translated per frame | 42,437 | 46,673 |
+| Copy preparation traffic per frame | 90.0 MB | 86.8 MB |
+| Texture traffic in preparation per frame | 19.0 MB | 24.9 MB |
+| Copy-back traffic per frame | 45.0 MB | 44.0 MB |
+| Title-buffer data compared on the CPU per frame | 28.4 MB | 28.8 MB |
+| Pieces compared on the GPU per frame | 11,165 | 11,139 |
+| Data fetched via the card-memory path per frame | 88.7 MB | 94.8 MB |
+| Constant buffer views bound directly per frame | Counter absent | 415 (85.3 KB) |
+
+| Memory and diagnostics | `victory-rdna2.log` | `victory-rdna3.log` |
+| --- | ---: | ---: |
+| Local video memory in use at the last logged budget change | 12,901 MB | 12,896 MB |
+| Shared GPU memory in use at that snapshot | 10,755 MB | 10,340 MB |
+| Local video-memory budget at that snapshot | 16,705 MB | 16,668 MB |
+| Indexed texture uploads logged by the last meter line | 177,557 (14,790 MB) | 124,930 (8,810 MB) |
+| Host pipelines loaded from cache by shutdown | 2,738 | 2,748 |
+| Host pipelines created during the session | 9 | 7 |
+| WARN-level messages | 210 | 157 |
+| Warnings about indexed textures changing after upload | 151 | 99 |
+
+The memory figures are D3D12 budget snapshots. Texture upload volume is cumulative. The missing-pipeline drops and texture warnings document remaining renderer limitations. Neither capture records enough visual detail to score picture quality.
+
+</details>
 
 ## Troubleshooting
 
