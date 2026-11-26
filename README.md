@@ -4,7 +4,7 @@ VIctory-RDNA is a Direct3D 12 compatibility layer for Xbox Series titles, tuned 
 
 This is an experimental project. GTA VI is the title used for the performance measurements below. Compatibility varies by title, build, and console profile. Supply your own game files from a copy you are authorized to use and keep the executable alongside its data files.
 
-The latest GTA VI capture on an **RX 7900 XT** recorded a **15.75 FPS median across 134 heavy-rendering samples** at **4K output** in Series X mode. It reached **19.7 FPS at 50.8 ms/frame** in two samples with more than 4,000 draws per frame and exited cleanly after **13 min 37 s**. [GTA VI measurements](#gta-vi-measurements)
+**20.7 FPS at 4K output in Series X mode** on an **RX 7900 XT**, at **48.4 ms/frame** and **4,149 draws/frame**. The latest capture recorded a **17.8 FPS median** across samples with at least 4,000 draws per frame. Descriptor-sync waits fell below **1 ms/frame** in the last two diagnostic samples. [GTA VI measurements](#gta-vi-measurements) · [Contribute](#contribute)
 
 ## Get started
 
@@ -95,7 +95,27 @@ From Command Prompt, `launch.bat -Log run.log` still invokes the command-line fl
 
 ### GTA VI measurements
 
-#### Latest Series X capture
+#### Series X performance milestone
+
+Three captures on **26 November 2026** used Windows D3D12, an **RX 7900 XT**, and **3840 × 2160 output**. `victory-rdna10.log` reached **20.7 FPS** at **48.4 ms/frame**. The peak and median below use all logged windows with at least **4,000 draws/frame**. The timing counters use the final two readings of each counter in each log.
+
+| Metric | `rdna8` | `rdna9` | `rdna10` |
+| --- | ---: | ---: | ---: |
+| Samples at 4,000+ draws/frame | 15 | 32 | 11 |
+| Sampled median FPS | 15.5 | 15.65 | **17.8** |
+| Best FPS sample | 19.1 | 18.4 | **20.7** |
+| Descriptor-sync wait | 7.90–8.75 ms | 3.27–5.21 ms | **0.27–0.90 ms** |
+| Title wait at present | 12.8–13.7 ms | 14.9–24.4 ms | **10.0–11.3 ms** |
+| GPU time with no work from the layer queued | 23.4–24.2 ms | 46.3–48.1 ms | **18.0–21.9 ms** |
+| GPU busy estimate from queue timing | 59–60% | 40–45% | **62–66%** |
+| Read-backs and list handling | 4.14–5.09 ms | 17.74–21.23 ms | **3.49–4.59 ms** |
+
+
+**Renderer Port 7** (`VICTORY_PORT_JOURNAL=1`) starts descriptor synchronization at title submission. In the final Port 7 sample, **16.5 of 17.5 preparations per frame** found that synchronization had already been requested. The midpoint of the final two descriptor-sync wait readings was **93% lower** than in `rdna8`. The same update uses the packed `DynamicBits` allocator and batches descriptor release through `release_dynamic_many`. The captures measure their combined result.
+
+In `rdna10`, all **11** samples above the draw threshold reported **0.0 ms** in the GPU settle-wait counter. The final queue timing put the idle time while waiting for the title to submit at about **1.9 ms/frame**. These counters measure particular waits. The 20.7 FPS result is a sampled peak, and sustained 20 FPS is still a benchmark target.
+
+#### Earlier 13-minute Series X capture
 
 `victory-rdna5.log` records a **26 November 2026** Windows D3D12 release run on an **RX 7900 XT**, using the RDNA3 Fast preset and a **3840 × 2160 presentation surface**. Heavy rendering first appeared at **1 min 57 s**. The run ended through the normal window-close path with **exit code 0**.
 
@@ -218,6 +238,7 @@ The memory figures are D3D12 budget snapshots. Texture upload volume is cumulati
 
 ## Known problems
 
+- **Latest benchmark ended in a GPU hang.** `rdna10` reported `DXGI_ERROR_DEVICE_HUNG` (`0x887A0006`) at **4 min 28 s** from startup. The render-path gains need a longer gameplay run to establish stability.
 - **Long-session stability.** The earlier warm run ended with `DXGI_ERROR_INVALID_CALL` (`0x887A0001`) after **48 min 26 s**. The final sample was **6.0 FPS at 167.6 ms/frame**, with **42.5 ms** in the heap-buffer pass and **21.5 ms** in GPU settle waits. The runtime recorded large resource sweeps before the failure. The cause remains unverified, and the latest clean run was shorter.
 - **Rendering gaps.** Missing host pipelines can drop draws, and the texture path still reports refresh warnings.
 
@@ -236,6 +257,12 @@ These are two separate follow-up tests for the warm run. Their effect on frame r
 - **Windows error 1455.** Check **Task Manager → Performance → Memory → Committed**. Free memory or increase the Windows paging file, then retry.
 
 For command references, input mappings, and renderer notes, see [the upstream documentation](docs/README-fxceless.md) and [the technical findings](docs/findings.md).
+
+## Contribute
+
+Help reproduce the **20.7 FPS Series X result** or isolate the GPU hang. Useful contributions include a 10-minute hands-on benchmark, a same-scene before-and-after trace for a renderer change, or a diagnostics log that points to the command preceding device removal.
+
+Include the tested commit, GPU and driver, console profile, output resolution, scene, and time under player control. Report average rendered FPS when available and describe how the run ended. Open an issue or pull request with a short summary and your own measurements. Keep game files out of submissions. [GitHub repository](https://github.com/XaviFortes/VIctory-RDNA)
 
 ## Credits
 
