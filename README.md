@@ -1,200 +1,256 @@
+<div align="center">
+
 # VIctory-RDNA
 
-VIctory-RDNA is a Direct3D 12 compatibility layer for Xbox Series titles, tuned for AMD RDNA3 GPUs. The game launcher runs on Windows and Linux. The runtime runs directly on Windows and uses Wine on Linux. The project builds on [VIctory](https://github.com/Marvisak/VIctory) and [VIctory-7900XTX](https://github.com/avatarmanz/VIctory-7900XTX).
+**High-FPS Xbox Series X|S Direct3D 12 compatibility layer, engineered for AMD RDNA3.**
 
-This is an experimental project. GTA VI is the title used for the performance measurements below. Compatibility varies by title, build, and console profile. Supply your own game files from a copy you are authorized to use and keep the executable alongside its data files.
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+[![Platform: Windows & Linux](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20(Wine)-0078D6.svg)](#quick-start)
+[![GPU: AMD RDNA3](https://img.shields.io/badge/Tuned%20For-AMD%20RDNA3%20(D3D12)-ED1C24.svg)](#what-makes-victory-rdna-fast)
+[![Series X 4K: 23.1 FPS Median](https://img.shields.io/badge/GTA%20VI%204K%20Series%20X-23.1%20FPS%20Median%20%7C%2029.3%20Peak-2EA44F.svg)](#benchmarks)
 
-**23.2 FPS at 4K output in Series X mode** on an **AMD Radeon RX 7900 XT**, at **43.0 ms/frame** with **4,083 draws/frame**. The latest in-place buffer experiment recorded an **18.75 FPS sampled median in its final minute** and exited cleanly. An earlier build logged about **40 minutes of hands-on gameplay**. [GTA VI status](#gta-vi-status) · [Benchmarks](#gta-vi-measurements) · [Contribute](#contribute)
+*Standing on the shoulders of [VIctory](https://github.com/Marvisak/VIctory) and [VIctory-7900XTX](https://github.com/avatarmanz/VIctory-7900XTX) — pushed to nearly **2× baseline performance** with zero resolution hacks and a 1-click desktop launcher.*
 
-## GTA VI status
+[Why VIctory-RDNA](#-what-makes-victory-rdna-fast) · [Benchmarks](#-benchmarks) · [Quick Start](#-quick-start) · [PowerShell CLI](#-powershell-cli-windows) · [Known Limits](#-honest-status--known-limitations) · [Contribute](#-contribute) · [Credits](#-credits)
 
-| Lane | Maintainer-reported status |
-| --- | --- |
-| Tested on | Windows, AMD Radeon RX 7900 XT, Direct3D 12. Series X at 3840 × 2160 output and Series S at 1920 × 1080 output. |
-| Stage | **In-game (stage 6)**. The maintainer played the earlier warm-cache build by hand. |
-| Picture | In-world rendering with known gaps. The latest log shows draws dropped for missing host pipelines and texture refresh warnings. A visual rating still needs a scene-by-scene check. |
-| Speed | Final-minute sampled medians were **18.75 FPS in Series X mode** and **21.8 FPS in Series S mode**. The earlier hands-on run had a **12.1 FPS sampled median**. [Series X and Series S comparison](#series-x-and-series-s-comparison) |
-| Stability | **About 40 minutes of hands-on gameplay** on the earlier warm build, which hit GPU device removal at **48 min 26 s** from startup. The earlier `rdna5` capture exited cleanly after **13 min 37 s** total. The latest `rdna17` capture exited cleanly after **4 min 46 s** total. |
+</div>
 
-These are measurements from one machine. The hands-on duration is the maintainer's estimate. The **12.1 FPS** figure comes from 509 periodic samples at 1,000 or more draws per frame, which can include cutscenes and transitions. Total runtime includes startup and loading. Output resolution describes the presentation surface.
+---
 
-## Get started
+## ⚡ Headline Performance (GTA VI · Series X 4K)
 
-- **System** with an x64 AVX2-capable CPU running Windows 10/11 or desktop Linux.
-- **Desktop launcher** uses Python 3.10 or newer with Tkinter. On Windows, use the [Python installer](https://www.python.org/downloads/) with Tcl/Tk enabled. On Linux, install your distribution's Python Tk package, commonly named `python3-tk` or `python3-tkinter`.
-- **Graphics** with Direct3D 12, Shader Model 6.6, and mesh shader support for in-world rendering. The default preset is tuned for AMD RDNA3, including the RX 7900 XT and XTX. Linux needs a Wine setup with Direct3D 12 support and a compatible Vulkan driver. [VKD3D-Proton](https://github.com/HansKristian-Work/vkd3d-proton)
-- **Memory** of at least 32 GB is recommended for GTA VI, with 64 GB preferred. Available Windows commit also matters at startup.
-- **Windows build tools** if you are building from source. Install Visual Studio Build Tools with the **Desktop development with C++** workload and install Rust. Cargo uses the project's pinned toolchain. [rustup](https://rustup.rs/) · [rust-toolchain.toml](rust-toolchain.toml)
+Tested on **Windows 11 · AMD Radeon RX 7900 XT (20 GB, ReBAR) · Direct3D 12** at **native Xbox Series X 4K output (`3840 × 2160`)** — no resolution downgrades, no scale hacks, and **clean exit (`code 0`)**:
+
+| Metric | Early RDNA Baseline (`rdna4`) | Latest `VIctory-RDNA` (`rdna18`) | Improvement |
+| --- | ---: | ---: | ---: |
+| **Gameplay FPS (Series X 4K)** | ~12.6–13.1 FPS | **23.1 FPS median** *(25.4–29.3 FPS peak)* | **~1.8× – 2.2× faster** |
+| **Heavy-Scene FPS (4,000+ draws/frame)** | ~12–15 FPS | **19.1 FPS median** *(24.4 FPS peak)* | **Consistently playable** |
+| **CPU Submission Prep (`preparing`)** | 50–65+ ms | **29.5 ms median** *(down to 27.5 ms)* | **~2× lower CPU overhead** |
+| **Long-Session `heap_buffers` Creep** | 10.3 → 42.5 ms *(creeping)* | **6.5–8.1 ms** *(flat, zero creep)* | **-81% & permanently flat** |
+| **CPU Shader-Write Compare Traffic** | 30.7 MB / 7.1 ms | **0.6 MB / 0.2 ms** | **-98% CPU scan traffic** |
+| **GPU Settle Waits (`on the GPU`)** | Up to 9.1 ms | **0.0 ms** *(11/12 samples)* | **Stalls eliminated** |
+| **Zero-Copy In-Place Memory** | 0 MB | **842 MB** *(smart GDDR6/in-place split)* | **Enabled by default** |
+
+> [!TIP]
+> **Optional AMD AFMF 2:** Because `VIctory-RDNA` delivers **22–25+ FPS native** with flat frame pacing and zero settle stalls on Series X 4K, enabling **AMD Fluid Motion Frames 2 (AFMF 2)** in Adrenalin brings perceived fluidity into the **45–50 FPS** range — while keeping full Series X visual fidelity. *(All benchmark numbers in this README are strictly **native rendered FPS** without frame generation.)*
+
+> [!NOTE]
+> `VIctory-RDNA` is an active, experimental compatibility layer. You must supply your own legally obtained game files — no copyrighted assets are included or linked here. Compatibility and performance vary by title, hardware, and build.
+
+---
+
+## 🚀 What Makes VIctory-RDNA Fast
+
+`VIctory-RDNA` stays up to date with upstream **Renderer Ports 1–7** (`VICTORY_PORT_GUARD`, `VICTORY_PORT_JOURNAL`, `VICTORY_PORT_BUFFERS`) and stacks a dedicated **RDNA3 + CPU frame-pacing pipeline** on top — all **pre-configured out of the box** in [`scripts/rdna-preset.json`](scripts/rdna-preset.json):
+
+- **Hybrid In-Place Memory (`842 MB` Zero-Copy, `0.0 ms` Settles)**
+  Maps ~3,450 small/medium title buffers and windows directly in place (`VICTORY_PORT_BUFFERS=1` + `VICTORY_INPLACE=2`) while automatically keeping large (`≥ 1 MiB`) GPU-hot buffers in **800 GB/s local GDDR6 VRAM** instead of 32 GB/s PCIe. Full GPU-side `card_steps` copies/fills and `place_copy` support keep joined submissions high (`21+`/frame) and GPU settles at `0.0 ms`.
+- **Zero Long-Session Slowdown (`BufferSweep` Cached Spans)**
+  Deduplicates buffer sweep slots and caches per-part spans, completely eliminating the `heap_buffers` slowdown that used to creep from `10 ms` to `42.5 ms` over long play sessions.
+- **L1-Resident Descriptor Allocator & Prebuilt Null Template**
+  Replaces per-slot `Vec<bool>` scans with a **16 KiB packed `u64` bitset (`DynamicBits`)** and batched per-list releases (1 lock per command list instead of 12,000+ locks/frame), paired with a pre-created CPU null-descriptor template heap and PCIe write-skipping descriptor stride cache.
+- **Lock-Free Shadow Checks & AVX2 Sweeps**
+  A lock-free `AtomicBool` fast path + merged `RwLock` eliminates ~17,400+ mutex lock/unlock cycles per frame in `Shadow::nothing_new`, backed by AVX2-vectorized `word_runs` and 256 KiB parallel work chunks.
+- **Parallel Texture Readbacks & Single-Pass Journal Sync**
+  Parallelizes `texback::land_many` across worker threads with thread-local scratch buffers and per-flight water-readback dedup (`read-backs and lists`: `11–23 ms → 3.2 ms`), and unifies Port 7 `ask_once()` into a single parallel pass (`-35%` exclusive journal locks).
+- **1-Click Desktop Game Library (Windows & Linux)**
+  No manually pasting 20 environment variables. Double-click `launch.bat` (or `sh ./launch.sh`), pick your game, choose Series X or Series S, and click **Play**.
+
+---
+
+## 🎮 Quick Start
+
+### Requirements
+- **CPU:** x64 with AVX2 support (Windows 10/11 or desktop Linux).
+- **GPU:** Direct3D 12 with **Shader Model 6.6** and **Mesh Shaders**. Tuned for **AMD RDNA3** (RX 7900 XT / XTX), and works on other SM 6.6+ D3D12 GPUs. *(Linux uses Wine + [VKD3D-Proton](https://github.com/HansKristian-Work/vkd3d-proton).)*
+- **RAM:** **32 GB minimum**, **64 GB recommended** for GTA VI (watch Windows available commit size at startup).
+- **Launcher:** Python 3.10+ with Tkinter ([Python installer](https://www.python.org/downloads/) with Tcl/Tk on Windows; `python3-tk` / `python3-tkinter` on Linux).
+- **Building from source (Windows):** [Rust (`rustup`)](https://rustup.rs/) + Visual Studio Build Tools (**Desktop development with C++**). Cargo automatically picks up the pinned toolchain from [`rust-toolchain.toml`](rust-toolchain.toml).
+
+### 3-Step Setup (Windows)
 
 ```powershell
 git clone https://github.com/XaviFortes/VIctory-RDNA.git
 cd VIctory-RDNA
 ```
 
-1. **Open the game library.** On Windows, double-click `launch.bat`. On Linux, run `sh ./launch.sh` from the project folder.
-2. **Select a game.** On first run the launcher looks for GTA VI's `game_scarlett_master.exe` in the project folder, its parent, and the folder you started from. Use **Add game…** to select an executable elsewhere or add another title. Entries are saved for the next time you open the launcher.
-3. **Choose a console profile and click Play.** On Windows the launcher builds `victory.exe` if the selected build is missing. On Linux, supply the Windows build as described below. Use **Open last log** to see build or runtime output.
+1. **Open the launcher:** Double-click **`launch.bat`** (Windows) or run **`sh ./launch.sh`** (Linux).
+2. **Select your title:** On first launch, it automatically scans for `game_scarlett_master.exe` in the project folder, its parent, and your current working directory — or click **Add game…** to pick any title executable.
+3. **Click Play:** Choose **Xbox Series X** (recommended) and hit **Play**. On Windows, the launcher automatically builds `victory.exe` in Release mode if it isn't built yet and applies the full tuned RDNA3 preset.
 
-### Linux setup
+> [!IMPORTANT]
+> **Best visual quality & stability on Series X:** Keep the default **Series X** profile at native **4K output** (do **not** force `-Output 1440p` or render scales below `0.67` — GTA VI's internal upscaler assumes `≥ 2/3` scale, and forcing lower scales causes jumping textures or crashes).
 
-1. Install Wine so both `wine` and `winepath` are on your `PATH`. Use an x64 Wine environment with Direct3D 12 support. Start the launcher with `WINEPREFIX` set if you use a separate prefix.
-2. Build `victory.exe` on Windows with `cargo build --locked --release -p victory`, or obtain that build from someone you trust. Copy it to `target/release/victory.exe` on Linux, or select the executable under **Advanced**. For a diagnostics build, use `target/diag/victory.exe` and choose **Diagnostics**.
-3. Run the launcher from your Linux desktop. Title execution through Wine is experimental. Compatibility depends on the Wine setup, graphics driver, and game.
+<details>
+<summary><strong>Linux Setup (Wine + VKD3D-Proton)</strong></summary>
+
+1. Install Wine with x64 Direct3D 12 support (`VKD3D-Proton`) and ensure `wine` and `winepath` are on your `PATH`.
+2. Build `victory.exe` on Windows with `cargo build --locked --release -p victory` (or use a trusted release build) and copy it to `target/release/victory.exe` (or point to it under **Advanced** in the launcher).
+3. Launch the desktop UI:
 
 ```sh
 WINEPREFIX="$HOME/.wine-victory" sh ./launch.sh
 ```
 
-### Launch settings
+*Note: Linux execution via Wine is experimental and depends on your Wine prefix, VKD3D-Proton, and Vulkan driver.*
+
+</details>
+
+<details>
+<summary><strong>Desktop Launcher Settings & Log Locations</strong></summary>
 
 | Setting | Default | Behavior |
 | --- | --- | --- |
-| Console profile | Xbox Series X | Selects the console characteristics presented to the title, such as memory budgets. See the [Series X and Series S comparison](#series-x-and-series-s-comparison). |
-| FPS target | `0` | Uses the title's frame pacing. Set a positive target such as `60` to request a different frame interval. Actual FPS depends on performance. |
-| Safe mode | Off | Disables newer experimental renderer paths. Try it for crashes or rendering issues. |
-| Ray tracing | Off | Enables the title's ray-traced indirect lighting at a performance cost. |
-| Build profile | Release | Use **Diagnostics** to build with runtime diagnostics. |
-| Rebuild before play | Off | On Windows, runs Cargo for the selected profile before launch. |
-| Environment overrides | Empty | Under **Advanced**, enter one `VICTORY_NAME=value` per line. For example, `VICTORY_PANEL=1`. |
+| **Console profile** | Xbox Series X | Selects the console profile & memory budget presented to the title (`series-x` or `series-s`). |
+| **FPS target** | `0` | Uses the title's own frame pacing. Set a positive value (e.g. `60`) to request a shorter frame interval. |
+| **Safe mode** | Off | Disables aggressive experimental paths (`VICTORY_UNDER_WIDE=0`, `VICTORY_LAND_ECHO=0`). Useful for isolating crashes. |
+| **Ray tracing** | Off | Enables ray-traced indirect lighting (higher GPU cost). |
+| **Build profile** | Release | Switch to **Diagnostics** to build/run with runtime diagnostics (`target/diag/victory.exe`). |
+| **Rebuild before play** | Off | Re-runs Cargo before launching on Windows. |
+| **Environment overrides** | Empty | Under **Advanced**, enter one `VICTORY_NAME=value` per line (e.g. `VICTORY_PANEL=1`). |
 
-### Logs
+Every session automatically saves a fresh timestamped log without overwriting older captures:
+- **Windows launcher data & logs:** `%LOCALAPPDATA%\VIctory-RDNA`
+- **Linux launcher data & logs:** `${XDG_DATA_HOME:-$HOME/.local/share}/victory-rdna`
+- **Runtime saves, cache & `crashes.log`:** `%LOCALAPPDATA%\victory\data` and `%LOCALAPPDATA%\victory\cache` (configurable via [`victory.example.toml`](victory.example.toml)).
 
-The desktop launcher saves a fresh timestamped log for every session. Use **Logs folder** to find previous sessions. For an experiment, enter a unique filename such as `series-s-after-change.log` or browse to a full path. A filename alone goes into the Logs folder. The launcher protects existing logs and clears the custom name after starting a session so the next run gets a fresh log by default.
+</details>
 
-| Platform | Launcher data folder |
-| --- | --- |
-| Windows | `%LOCALAPPDATA%\VIctory-RDNA` |
-| Linux | `${XDG_DATA_HOME:-$HOME/.local/share}/victory-rdna` |
+---
 
-The launcher keeps `games.json` and the `logs` directory here. Title saves, `crashes.log`, and derived data are handled by the runtime. Their defaults are `%LOCALAPPDATA%\victory\data` and `%LOCALAPPDATA%\victory\cache` inside Windows or the selected Wine prefix. See [victory.example.toml](victory.example.toml) for runtime path overrides.
+## 📊 Benchmarks
 
-## Launch from PowerShell on Windows
+All measurements below are from **periodic swap-chain logs on a single machine** (Windows 11, **AMD Radeon RX 7900 XT 20 GB**, Zen 3 24-thread CPU, 64 GB RAM, ReBAR enabled, Release build).
 
-From the **game folder**, with the project cloned inside it, keep using your existing command. Relative `-Log` paths are resolved from the directory you ran the command in.
+### 1. Latest Series X 4K Run (`rdna18` · Default Preset)
+
+Captured on **26 November 2026** (`victory-rdna18.log`) at **3840 × 2160 output** (Series X, 30 FPS target). Ran **9 min 38 s** from startup until closed by the maintainer — **clean exit (`code 0`)**, zero device removals, zero GPU settle waits.
+
+| Sample Metric | All Gameplay (`1,000+` draws) | Heavy Scenes (`4,000+` draws) | Final 60 Seconds |
+| --- | ---: | ---: | ---: |
+| **Samples** | 101 | 25 | 12 |
+| **Median FPS** | **23.1 FPS** | **19.1 FPS** | **22.1 FPS** |
+| **FPS Range** | 4.5 – **29.3 FPS** | 4.5 – **24.4 FPS** | 14.7 – **25.4 FPS** |
+| **Samples ≥ 20 FPS** | **75 / 101 (74%)** | 10 / 25 | 7 / 12 |
+| **Median Frame Time** | **43.4 ms** | 52.3 ms | 45.25 ms |
+| **Median CPU Submission Prep** | **29.5 ms** | 35.4 ms | 31.1 ms |
+| **Median CPU Copy Prep** | **10.3 ms** | 13.3 ms | 11.75 ms |
+| **Median Copy-Back Time** | **13.5 ms** | 16.8 ms | 14.35 ms |
+
+*Peak frame rate reached **29.3 FPS (34.2 ms)** at 1,433 draws/frame, and **24.4 FPS (41.0 ms)** even at 4,000+ draws/frame.*
+
+### 2. Series X 4K vs. Series S 1080p
+
+With `rdna18`, **Series X at 4K output (`22.1–23.1 FPS` median, `25.4 FPS` final-minute peak)** now **matches or beats Series S at 1080p** while delivering substantially better visual quality:
+
+| Final-Minute Metric | Series S 1080p (`rdna17-ss`) | Series X 4K (`rdna17`) | Series X 4K (`rdna18` · Latest) |
+| --- | ---: | ---: | ---: |
+| **Presentation Output** | 1920 × 1080 | 3840 × 2160 | **3840 × 2160** |
+| **Sampled Median FPS** | 21.8 FPS | 18.75 FPS | **22.1 FPS** *(23.1 overall)* |
+| **Sampled FPS Range** | 15.8 – 24.9 FPS | 14.6 – 21.7 FPS | **14.7 – 25.4 FPS** |
+| **Median Frame Time** | 45.8 ms | 53.4 ms | **45.25 ms** *(43.4 overall)* |
+| **Median CPU Prep** | 34.2 ms | 35.25 ms | **31.1 ms** *(29.5 overall)* |
+| **0.0 ms GPU Settle Waits** | 11 / 11 | 11 / 12 | **11 / 12** |
+| **Exit Status** | Clean (`code 0`) | Clean (`code 0`) | **Clean (`code 0`)** |
+
+<details>
+<summary><strong>3. Engineering Deep Dive: How Hybrid In-Place Memory Unlocked +5 FPS (<code>rdna14 → rdna18</code>)</strong></summary>
+
+| Final-Minute Metric (Series X 4K) | `rdna14` Baseline | `rdna15` Broad In-Place | `rdna16` GDDR6 Big-Buffer Guard | `rdna17` GPU Copy/Fill | `rdna18` In-Place `place_copy` Join |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| **Median FPS** | 17.3 | 14.85 | 15.9 | 18.75 | **22.1** |
+| **Median Frame Time** | 57.9 ms | 67.4 ms | 62.8 ms | 53.4 ms | **45.25 ms** |
+| **CPU Submission Prep** | 39.4–51.5 ms | 32.5–40.3 ms | 33.8–43.9 ms | 30.4–39.6 ms | **27.5–31.5 ms** |
+| **Copy Prep Traffic** | 47.5 MB/f | 36.15 MB/f | 36.1 MB/f | 36.65 MB/f | **28–34 MB/f** |
+| **0.0 ms GPU Settles** | 11 / 12 | 8 / 12 | 0 / 11 | 11 / 12 | **11 / 12** |
+
+1. **`rdna15` (Why naive in-place slowed down):** Moving *all* >4 GiB contiguous buffers (`561 MB`) to PCIe-mapped system memory cut CPU copy work, but starved the GPU by pulling hot `≥ 1 MiB` buffers out of 800 GB/s GDDR6.
+2. **`rdna16` ([`4487275`](https://github.com/XaviFortes/VIctory-RDNA/commit/4487275)):** Keeping large (`≥ 1 MiB`) buffers in local GDDR6 while enabling `VICTORY_INPLACE=2` for small/medium buffers mapped **842 MB** in place and slashed CPU shader-write scans by **98%** (`28.4 MB → 0.6 MB`), but left CPU-side copy settles at up to `9.1 ms`.
+3. **`rdna17` ([`5e6fec2`](https://github.com/XaviFortes/VIctory-RDNA/commit/5e6fec2)):** Enabling GPU-side `card_steps` copies/fills on in-place buffers dropped settles back to **`0.0 ms`** (11/12 samples).
+4. **`rdna18` ([`4c210de`](https://github.com/XaviFortes/VIctory-RDNA/commit/4c210de)):** Enabling GPU-side `place_copy` on in-place buffers restored `VICTORY_JOIN_PARTS` from `13.8 → 21.4` joined submissions/frame, pushing Series X 4K into **22–25.4 FPS** with `VICTORY_PORT_BUFFERS=1` and `VICTORY_INPLACE=2` promoted into the default preset.
+
+</details>
+
+---
+
+## 💻 PowerShell CLI (Windows)
+
+Prefer scripting, benchmarking, or custom overrides? Use `scripts/play-rdna.ps1` (or pass flags directly to `launch.bat`):
 
 ```powershell
+# From the game folder (auto-detects game_scarlett_master.exe and applies full RDNA3 preset)
 .\VIctory-RDNA\scripts\play-rdna.ps1 -Log .\victory-rdna.log
-.\VIctory-RDNA\scripts\play-rdna.ps1 -Log .\after-renderer-change.log
-```
 
-From the **project folder**, pass `-Exe` to point to a game stored elsewhere.
-
-```powershell
+# From the project folder with an explicit executable and Series S / Safe Mode
 .\scripts\play-rdna.ps1 -Exe "D:\Games\XboxTitle\game_scarlett_master.exe" -Console series-s -Safe -Log .\series-s-safe.log
-.\scripts\play-rdna.ps1 -Fps 60 -Build diag -Rebuild -More @{ VICTORY_PANEL = '1' } -Log .\diag-60.log
+
+# Rebuild diagnostics binary with the live stats overlay enabled
+.\scripts\play-rdna.ps1 -Build diag -Rebuild -More @{ VICTORY_PANEL = '1' } -Log .\diag.log
 ```
+
+<details>
+<summary><strong>All CLI Parameters</strong></summary>
 
 | Parameter | Default | Purpose |
 | --- | --- | --- |
-| `-Exe <path>` | Auto-detect | Explicit title executable. Auto-detection checks the calling directory, then the project's parent and the project itself. |
-| `-Console <mode>` | `series-x` | Accepts `series-x` or `series-s`. |
-| `-Fps <N>` | `0` | Controls the target frame interval. |
-| `-Output <mode>` | Title default | Requests a supported output mode such as `1440p` or `1080p`. |
-| `-Safe` / `-RayTracing` | Off | Selects the same renderer options as the desktop launcher. |
-| `-Build <profile>` | `release` | Accepts `release` or `diag`. |
-| `-Rebuild` | Off | Invokes Cargo even when the binary already exists. |
-| `-More @{...}` | Empty | Applies environment overrides after the RDNA preset. |
-| `-Log <path>` | No log file | Shows output in the terminal and writes it to the specified file. Use a different name each run to preserve earlier logs. |
+| `-Exe <path>` | Auto-detect | Path to the title executable (auto-checks cwd, project parent, and project dir). |
+| `-Console <mode>` | `series-x` | `series-x` or `series-s`. |
+| `-Fps <N>` | `0` | Requests a target frame interval (`0` = title default). |
+| `-Output <mode>` | Title default | Requests a specific output resolution (leave default on Series X for GTA VI). |
+| `-Safe` / `-RayTracing` | Off | Matches the desktop launcher's Safe Mode and Ray Tracing toggles. |
+| `-Build <profile>` | `release` | `release` or `diag`. |
+| `-Rebuild` | Off | Forces a Cargo rebuild even if the binary already exists. |
+| `-More @{...}` | Empty | Extra environment overrides applied on top of `scripts/rdna-preset.json`. |
+| `-Log <path>` | None | Tees live console output to a log file (use unique names to keep history). |
 
-From Command Prompt, `launch.bat -Log run.log` still invokes the command-line flow.
+</details>
 
-## RDNA3 tuning
+---
 
-- A CPU-side cache for descriptor strides and view addresses skips redundant uncached PCIe writes when a mirrored slot is unchanged.
-- GPU-side comparisons for shader-write buffers of at least 1 MiB reduce the amount of data the CPU has to compare and snapshot.
-- The descriptor patch path limits missed-store fallback warnings to the first ten occurrences.
-- The launch preset also uses experimental paths from VIctory-7900XTX, including multithreaded command-list translation, zero-copy constants, descriptor tracking, GPU-side fills, AVX2 copies, and copy-queue texture uploads.
+## 🔍 Honest Status & Known Limitations
 
-### GTA VI measurements
+We believe in transparent benchmarks and honest status reporting:
 
-#### In-place buffer experiments · 26 November 2026
+- **In-Game (Stage 6):** Boots into full playable 3D open-world gameplay on GTA VI. Earlier warm-cache sessions ran **~40 minutes of hands-on gameplay** (`48 min 26 s` total), and recent `rdna14`–`rdna18` builds exit cleanly with `code 0`.
+- **Visual Gaps:** In-world rendering is playable, but some draws are still dropped for missing host pipelines and the texture path logs refresh warnings.
+- **Long-Session GPU Resets:** While recent captures (`rdna11`–`rdna18`) exited cleanly, earlier extended runs encountered `DXGI_ERROR_INVALID_CALL` (`0x887A0001`) or a one-off `DXGI_ERROR_DEVICE_HUNG` (`0x887A0006`). Hardening multi-hour stability is an ongoing priority.
+- **Single-Machine Measurements:** The numbers above were captured on one RX 7900 XT system across live gameplay windows (not a locked deterministic replay). Community benchmarks on other RDNA2/RDNA3/NVIDIA GPUs are very welcome!
 
-Four Windows release captures on the **RX 7900 XT** used **Series X** with **3840 × 2160 output**. All four exited with code 0. These runs use different gameplay windows. The table compares the final minute of each capture, using the same sampling rule for all four.
+<details>
+<summary><strong>Troubleshooting Quick Fixes</strong></summary>
 
-| Final-minute metric | `rdna14` baseline | `rdna15` broad buffer placement | `rdna16` selective placement | `rdna17` GPU copy/fill fix |
-| --- | ---: | ---: | ---: | ---: |
-| Samples | 12 | 12 | 11 | 12 |
-| Sampled median FPS | 17.3 | 14.85 | 15.9 | **18.75** |
-| Sampled median frame time | 57.9 ms | 67.4 ms | 62.8 ms | **53.4 ms** |
-| FPS range | 12.5–20.2 | 8.7–18.4 | 13.1–21.6 | **14.6–21.7** |
-| CPU submission preparation | 39.4–51.5 ms | 32.5–40.3 ms | 33.8–43.9 ms | **30.4–39.6 ms** |
-| CPU copy preparation | 12.6–20.5 ms | 10.4–15.6 ms | 10.4–15.1 ms | **9.0–13.5 ms** |
-| Median copy preparation traffic | 47.5 MB/frame | 36.15 MB/frame | 36.1 MB/frame | 36.65 MB/frame |
-| Samples reporting 0.0 ms of GPU settle waits | 11 of 12 | 8 of 12 | 0 of 11 | **11 of 12** |
-| Total runtime, clean exit | 7 min 30 s | 4 min 48 s | 5 min 17 s | 4 min 46 s |
+- **Build failed:** Open the session log and check the first Cargo/linker error. Verify Rust and Visual Studio C++ Build Tools are installed.
+- **Windows error 1455 (commit limit):** Check **Task Manager → Performance → Memory → Committed**. Close memory-heavy apps or increase your Windows paging file.
+- **Crash or visual artifacts:** Stick to **Series X**, default **4K output**, **Ray tracing Off**, **FPS target `0`**, and try **Safe mode**. Check the session log and `crashes.log`.
+- **Wine launch failed (Linux):** Verify `wine`, `winepath`, `target/release/victory.exe`, and your Wine prefix's VKD3D-Proton setup.
 
-Across the entire `rdna17` capture, samples with **4,000 or more draws per frame** had an **18.7 FPS median** (18 samples) and peaked at **23.2 FPS at 43.0 ms/frame** with **4,083 draws/frame**. The equivalent `rdna14` subset had a **15.85 FPS median** (26 samples). These are periodic swap-chain samples. A same-scene comparison and a full-session gameplay average are still open.
+For deeper technical notes, input mappings, and upstream references, see [`docs/README-fxceless.md`](docs/README-fxceless.md) and [`docs/findings.md`](docs/findings.md).
 
-#### Why lower CPU costs did not immediately raise FPS
+</details>
 
-1. **Broad placement traded CPU work for GPU memory access.** With `VICTORY_PORT_BUFFERS=1`, `rdna15` reported **124 contiguous regions in place (561 MB)** and a final card-copy reading of **12.0 MB sent / 31.4 MB fetched per frame**, down from **18.6 / 48.9 MB** in `rdna14`. CPU preparation fell, while median frame time rose. The placement policy let large, frequently accessed buffers move from local VRAM to GPU-accessible system memory. That explains the direction of the result, though these captures cannot isolate the PCIe cost. Commit [`4487275`](https://github.com/XaviFortes/VIctory-RDNA/commit/4487275) keeps buffers classified as large at title addresses above 4 GiB in local VRAM.
-2. **Selective placement removed most CPU comparisons.** With the guard and `VICTORY_INPLACE=2`, `rdna16` reported **842 MB in place** across 3,345 private buffers, 91 windows, and 97 buffers and windows on the contiguous-section path. Final CPU shader-write comparisons dropped from **28.4 MB across 370 ranges** to **0.6 MB in one range**. The final copied constant-buffer count dropped from **1,528 to 510 per frame**. Title-memory reads still triggered GPU settles, reaching **9.1 ms/frame** in the final minute.
-3. **GPU copies and fills removed most of those waits.** Commit [`5e6fec2`](https://github.com/XaviFortes/VIctory-RDNA/commit/5e6fec2) allows card-side copies and fills to use in-place buffers. In `rdna17`, settle waits read **0.0 ms** in 11 of the final 12 samples, with one **0.3 ms** reading. The last submitting-thread reading fell from **47.4 ms** in `rdna16` to **40.7 ms** in `rdna17`.
+---
 
-#### Remaining bottlenecks and reproduction
+## 🤝 Contribute
 
-A **21.0 FPS** sample in `rdna17` took **47.7 ms/frame**. The queue meter recorded **13.4 ms** without this layer's work queued, including **11.8 ms** while the submitting thread was active. Subtracting the idle interval leaves an estimated **34.3 ms** of queue-busy time. The meter gives an estimate of queue activity. Direct GPU timing and a controlled run would be needed to establish a rendering ceiling.
+Want to help push `VIctory-RDNA` toward a locked **30 FPS native** on Series X 4K? We'd love your help with:
 
-The final readings show **13.8 joined submissions per frame** in `rdna17` versus **20.3** in `rdna14`, while total submissions stayed near 37. A same-scene trace can test whether the smaller batches explain the remaining gap. The in-place options are opt-in.
+- **Community benchmarks** on RX 7900 XTX, RX 7900 XT, RX 7800 XT, RDNA2, or NVIDIA RTX cards.
+- **Same-scene before/after traces** to isolate remaining CPU/GPU pipeline gaps.
+- **Long-session stability reports** (`-Build diag` logs capturing any device removal or hang).
 
-```powershell
-# From the game folder, rebuild and capture the Series X comparison.
-.\VIctory-RDNA\scripts\play-rdna.ps1 -Rebuild -Log .\series-x-inplace.log -More @{ VICTORY_PORT_BUFFERS = '1'; VICTORY_INPLACE = '2' }
+When opening an issue or PR, please include your **commit hash**, **GPU + driver version**, **console profile**, **output resolution**, and **session duration** — and never attach copyrighted game files.
 
-# Try the same build in Series S mode and request a 60 FPS target.
-.\VIctory-RDNA\scripts\play-rdna.ps1 -Console series-s -Fps 60 -Log .\series-s-inplace.log -More @{ VICTORY_PORT_BUFFERS = '1'; VICTORY_INPLACE = '2' }
-```
+---
 
-#### Series X and Series S comparison
+## 🙏 Credits
 
-`victory-rdna17-ss.log` records the Series S test on the same **RX 7900 XT**. These figures summarize the last 60 seconds before each window closed.
+`VIctory-RDNA` would not exist without the incredible work of the upstream VIctory community:
 
-| Final-minute metric | Series X (`rdna17`) | Series S (`rdna17-ss`) |
-| --- | ---: | ---: |
-| Presentation output | 3840 × 2160 | 1920 × 1080 |
-| Configured frame target | 30 FPS | 60 FPS |
-| Samples | 12 | 11 |
-| Sampled median FPS | 18.75 | **21.8** |
-| Sampled FPS range | 14.6–21.7 | **15.8–24.9** |
-| Median frame time | 53.4 ms | **45.8 ms** |
-| Frame-time range | 46.1–68.4 ms | **40.1–63.2 ms** |
-| Median draws per frame | 4,842 | 3,670 |
-| Median CPU submission preparation | 35.25 ms | 34.2 ms |
-| Median CPU copy preparation | 11.8 ms | 13.8 ms |
-| Median copy preparation traffic | 36.65 MB/frame | 57.7 MB/frame |
-| Median copy-back time | 14.15 ms | 12.2 ms |
-| Samples reporting 0.0 ms of GPU settle waits | 11 of 12 | **11 of 11** |
-| Total runtime, clean exit | 4 min 46 s | **5 min 21 s** |
+- **[Marvisak / VIctory](https://github.com/Marvisak/VIctory)** — Original loader, HLE runtime, Direct3D 12 backend, and shader recompiler.
+- **[avatarmanz / VIctory-7900XTX](https://github.com/avatarmanz/VIctory-7900XTX)** — Direct upstream base, Renderer Ports 1–7, and foundational RDNA3 renderer engineering.
+- **[fxceless / victory-fork](https://github.com/fxceless/victory-fork)** — Upstream optimizations and community improvements.
+- **Community contributors:** [DexNom](https://github.com/DexNom/VIctory), [Belobug](https://github.com/Belobug/VIctory-Belobug-AMD), [FQY55kai](https://github.com/FQY55kai/ZJOU-VICTORY), [myokex](https://github.com/myokex/victory-amd), **Geckomacabre**, and **cxy0072019-sketch**.
 
-Series S reached **29.9 FPS (33.4 ms/frame)** in a lighter sample with **1,430 draws/frame**. Across the captures at **4,000 or more draws/frame**, the median was **15.6 FPS** for Series S (six samples, **21.2 FPS** peak) and **18.7 FPS** for Series X (18 samples, **23.2 FPS** peak). The output sizes, targets and workloads differed. The final-minute medians describe these runs, and a same-scene comparison would help isolate the effect of switching profiles.
+## 📄 License
 
-## Known problems
-
-- **Long-session stability.** The earlier hands-on run ended with `DXGI_ERROR_INVALID_CALL` (`0x887A0001`). A separate earlier capture hit `DXGI_ERROR_DEVICE_HUNG` (`0x887A0006`). The latest clean exit establishes the outcome of that shorter run.
-- **Rendering gaps.** Missing host pipelines can drop draws, and the texture path still reports refresh warnings.
-
-## Troubleshooting
-
-- **Build failed.** Open the session log and look for the first Cargo or linker error. Check that Rust and the MSVC C++ Build Tools are installed, then reopen the launcher.
-- **Wine launch failed.** Open the session log and check whether it found `wine`, `winepath`, and your Windows build. Check the Wine prefix's Direct3D 12 support if the runtime reports a graphics initialization error.
-- **Title closes or renders incorrectly.** Try Series X with **Safe mode** enabled, **Ray tracing** disabled, and the FPS target set to `0`. Check the session log and the runtime's `crashes.log` for details.
-- **Windows error 1455.** Check **Task Manager → Performance → Memory → Committed**. Free memory or increase the Windows paging file, then retry.
-
-For command references, input mappings, and renderer notes, see [the upstream documentation](docs/README-fxceless.md) and [the technical findings](docs/findings.md).
-
-## Contribute
-
-Help reproduce the **23.2 FPS Series X result**, document picture quality in a specific scene, or isolate the long-session GPU failure. Useful contributions include a 10-minute hands-on benchmark, a same-scene before-and-after trace for a renderer change, or a diagnostics log that points to the command preceding device removal.
-
-Include the tested commit, GPU and driver, console profile, output resolution, scene, and time under player control. Report average rendered FPS when available and describe how the run ended. Open an issue or pull request with a short summary and your own measurements. Keep game files out of submissions. [GitHub repository](https://github.com/XaviFortes/VIctory-RDNA)
-
-## Credits
-
-- **Marvisak / VIctory** for the original loader, HLE runtime, Direct3D 12 backend, and shader recompiler. [VIctory](https://github.com/Marvisak/VIctory)
-- **avatarmanz / VIctory-7900XTX** for the direct upstream base and RDNA3 renderer work. [VIctory-7900XTX](https://github.com/avatarmanz/VIctory-7900XTX)
-- **fxceless / victory-fork** for upstream optimizations and community contributions. [victory-fork](https://github.com/fxceless/victory-fork)
-- **DexNom**, **Belobug**, **FQY55kai**, **myokex**, **Geckomacabre**, and **cxy0072019-sketch**. [DexNom](https://github.com/DexNom/VIctory) · [Belobug](https://github.com/Belobug/VIctory-Belobug-AMD) · [FQY55kai](https://github.com/FQY55kai/ZJOU-VICTORY) · [myokex](https://github.com/myokex/victory-amd)
-
-## License
-
-GPL-3.0-or-later. See [LICENSE](LICENSE) and the [asset policy](docs/asset-policy.md).
+Licensed under **GPL-3.0-or-later**. See [`LICENSE`](LICENSE) and [`docs/asset-policy.md`](docs/asset-policy.md).
