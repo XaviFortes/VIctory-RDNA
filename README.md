@@ -10,10 +10,10 @@ This is an experimental project. GTA VI is the title used for the performance me
 
 | Lane | Maintainer-reported status |
 | --- | --- |
-| Tested on | Windows, AMD Radeon RX 7900 XT, Direct3D 12. Xbox Series X profile with 3840 × 2160 presentation output. |
+| Tested on | Windows, AMD Radeon RX 7900 XT, Direct3D 12. Series X at 3840 × 2160 output and Series S at 1920 × 1080 output. |
 | Stage | **In-game (stage 6)**. The maintainer played the earlier warm-cache build by hand. |
 | Picture | In-world rendering with known gaps. The latest log shows draws dropped for missing host pipelines and texture refresh warnings. A visual rating still needs a scene-by-scene check. |
-| Speed | Latest Series X capture peaked at **23.2 FPS (43.0 ms/frame)** and recorded an **18.75 FPS sampled median in its final minute**. The earlier hands-on run had a **12.1 FPS sampled median**. |
+| Speed | Final-minute sampled medians were **18.75 FPS in Series X mode** and **21.8 FPS in Series S mode**. The earlier hands-on run had a **12.1 FPS sampled median**. [Series X and Series S comparison](#series-x-and-series-s-comparison) |
 | Stability | **About 40 minutes of hands-on gameplay** on the earlier warm build, which hit GPU device removal at **48 min 26 s** from startup. The earlier `rdna5` capture exited cleanly after **13 min 37 s** total. The latest `rdna17` capture exited cleanly after **4 min 46 s** total. |
 
 These are measurements from one machine. The hands-on duration is the maintainer's estimate. The **12.1 FPS** figure comes from 509 periodic samples at 1,000 or more draws per frame, which can include cutscenes and transitions. Total runtime includes startup and loading. Output resolution describes the presentation surface.
@@ -49,7 +49,7 @@ WINEPREFIX="$HOME/.wine-victory" sh ./launch.sh
 
 | Setting | Default | Behavior |
 | --- | --- | --- |
-| Console profile | Xbox Series X | Selects the console characteristics presented to the title, such as memory budgets. GTA VI was benchmarked with Series X. Series S may behave differently. |
+| Console profile | Xbox Series X | Selects the console characteristics presented to the title, such as memory budgets. See the [Series X and Series S comparison](#series-x-and-series-s-comparison). |
 | FPS target | `0` | Uses the title's frame pacing. Set a positive target such as `60` to request a different frame interval. Actual FPS depends on performance. |
 | Safe mode | Off | Disables newer experimental renderer paths. Try it for crashes or rendering issues. |
 | Ray tracing | Off | Enables the title's ray-traced indirect lighting at a performance cost. |
@@ -135,7 +135,7 @@ Across the entire `rdna17` capture, samples with **4,000 or more draws per frame
 
 A **21.0 FPS** sample in `rdna17` took **47.7 ms/frame**. The queue meter recorded **13.4 ms** without this layer's work queued, including **11.8 ms** while the submitting thread was active. Subtracting the idle interval leaves an estimated **34.3 ms** of queue-busy time. The meter gives an estimate of queue activity. Direct GPU timing and a controlled run would be needed to establish a rendering ceiling.
 
-The final readings show **13.8 joined submissions per frame** in `rdna17` versus **20.3** in `rdna14`, while total submissions stayed near 37. A same-scene trace can test whether the smaller batches explain the remaining gap. The in-place options are opt-in. Series S at a 60 FPS target is a follow-up test with performance still to be measured.
+The final readings show **13.8 joined submissions per frame** in `rdna17` versus **20.3** in `rdna14`, while total submissions stayed near 37. A same-scene trace can test whether the smaller batches explain the remaining gap. The in-place options are opt-in.
 
 ```powershell
 # From the game folder, rebuild and capture the Series X comparison.
@@ -144,6 +144,29 @@ The final readings show **13.8 joined submissions per frame** in `rdna17` versus
 # Try the same build in Series S mode and request a 60 FPS target.
 .\VIctory-RDNA\scripts\play-rdna.ps1 -Console series-s -Fps 60 -Log .\series-s-inplace.log -More @{ VICTORY_PORT_BUFFERS = '1'; VICTORY_INPLACE = '2' }
 ```
+
+#### Series X and Series S comparison
+
+`victory-rdna17-ss.log` records the Series S test on the same **RX 7900 XT**. These figures summarize the last 60 seconds before each window closed.
+
+| Final-minute metric | Series X (`rdna17`) | Series S (`rdna17-ss`) |
+| --- | ---: | ---: |
+| Presentation output | 3840 × 2160 | 1920 × 1080 |
+| Configured frame target | 30 FPS | 60 FPS |
+| Samples | 12 | 11 |
+| Sampled median FPS | 18.75 | **21.8** |
+| Sampled FPS range | 14.6–21.7 | **15.8–24.9** |
+| Median frame time | 53.4 ms | **45.8 ms** |
+| Frame-time range | 46.1–68.4 ms | **40.1–63.2 ms** |
+| Median draws per frame | 4,842 | 3,670 |
+| Median CPU submission preparation | 35.25 ms | 34.2 ms |
+| Median CPU copy preparation | 11.8 ms | 13.8 ms |
+| Median copy preparation traffic | 36.65 MB/frame | 57.7 MB/frame |
+| Median copy-back time | 14.15 ms | 12.2 ms |
+| Samples reporting 0.0 ms of GPU settle waits | 11 of 12 | **11 of 11** |
+| Total runtime, clean exit | 4 min 46 s | **5 min 21 s** |
+
+Series S reached **29.9 FPS (33.4 ms/frame)** in a lighter sample with **1,430 draws/frame**. Across the captures at **4,000 or more draws/frame**, the median was **15.6 FPS** for Series S (six samples, **21.2 FPS** peak) and **18.7 FPS** for Series X (18 samples, **23.2 FPS** peak). The output sizes, targets and workloads differed. The final-minute medians describe these runs, and a same-scene comparison would help isolate the effect of switching profiles.
 
 ## Known problems
 
