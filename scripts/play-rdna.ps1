@@ -109,6 +109,8 @@ if ($Safe) {
     $settings['VICTORY_UPLOAD_AHEAD']     = '1'
     $settings['VICTORY_PORT_CONSTANTS']   = '1'
     $settings['VICTORY_PORT_DESCRIPTORS'] = '1'
+    $settings['VICTORY_SYNC_FINE']        = '1'
+    $settings['VICTORY_LAND_SKIP']        = '1'
 }
 
 if ($RayTracing) {

@@ -170,6 +170,12 @@ pub(crate) struct HostHeap {
     /// waited for most (5.6 % of their time, profile waits-1: each descriptor
     /// made for a draw takes it, and lets go of what the slot held under it).
     kept: Box<[Mutex<Option<ID3D12Resource>>]>,
+    /// Per-slot packed state (`count + dynamic` entries): bit 7 (`SLOT_HAS_KEPT`)
+    /// mirrors whether `kept[i]` holds `Some(_)` so `keep(i, None)` skips taking
+    /// the slot's mutex when empty; bits 0..=6 (`SLOT_NULL_MASK`) cache the
+    /// exact null descriptor kind currently in slot `i` (`NULL_NONE` = non-null)
+    /// so redundant null writes skip both `Create*View` and `CopyDescriptorsSimple`.
+    slot_state: Box<[std::sync::atomic::AtomicU8]>,
     /// Where the search for free dynamic slots starts, and which are taken
     /// (by lists not yet reset).
     next: Mutex<(u32, Vec<bool>)>,
@@ -1756,6 +1762,7 @@ impl HostHeap {
             waiting: Mutex::default(),
             away: Mutex::default(),
             kept: (0..count + extra).map(|_| Mutex::new(None)).collect(),
+            slot_state: (0..count + extra).map(|_| std::sync::atomic::AtomicU8::new(NULL_NONE)).collect(),
             next: Mutex::new((0, vec![false; extra as usize])),
             free: std::sync::atomic::AtomicU32::new(extra),
             too_long: std::sync::atomic::AtomicU32::new(u32::MAX),
@@ -1848,6 +1855,11 @@ impl HostHeap {
                     done += n;
                 }
             }
+        }
+        let initial_null = if self.sampler { NULL_SAMPLER } else { NULL_SRV_2D };
+        let limit = (total as usize).min(self.slot_state.len());
+        for s in &self.slot_state[..limit] {
+            s.store(initial_null, std::sync::atomic::Ordering::Relaxed);
         }
         Ok(())
     }
@@ -2555,10 +2567,9 @@ impl HostHeap {
             return;
         }
         match view_at(key as u32, (key >> 32) as u32) {
-            Some(view) => null_for(&view, self.at(index)),
-            None => null_view(self.at(index)),
+            Some(view) => self.put_null_for(index, &view),
+            None => self.put_null_view(index),
         }
-        self.put(index);
         self.clear_twin(index);
         self.keep(index, None);
     }
@@ -2825,9 +2836,10 @@ impl HostHeap {
     pub(crate) fn make_at(&self, index: u32, view: &View) {
         let kept = make_twinned(view, self.at(index), self.twin(index));
         if kept.is_none() {
-            null_for(view, self.at(index));
+            self.put_null_for(index, view);
+        } else {
+            self.put(index);
         }
-        self.put(index);
         self.twin_made(index, kept.is_some() && twinned(view));
         self.keep(index, kept.flatten());
     }
@@ -2885,6 +2897,7 @@ impl HostHeap {
     /// As [`HostHeap::copy_to`], from the slot `from`, which the card does not
     /// see.
     fn copy_from(&self, to: u32, from: D3D12_CPU_DESCRIPTOR_HANDLE) {
+        self.clear_slot_null_kind(to);
         #[cfg(feature = "diagnostics")]
         if let Some(written) = self.written.get(to as usize) {
             written.store(crate::host::coarse_ms() as u32, std::sync::atomic::Ordering::Relaxed);
@@ -2894,13 +2907,62 @@ impl HostHeap {
         unsafe { host.device.CopyDescriptorsSimple(1, self.cpu(to), from, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV) };
     }
 
+    fn slot_null_kind(&self, index: u32) -> u8 {
+        self.slot_state
+            .get(index as usize)
+            .map_or(NULL_NONE, |s| s.load(std::sync::atomic::Ordering::Relaxed) & SLOT_NULL_MASK)
+    }
+
+    fn set_slot_null_kind(&self, index: u32, kind: u8) {
+        if let Some(s) = self.slot_state.get(index as usize) {
+            let kind = kind & SLOT_NULL_MASK;
+            let _ = s.fetch_update(
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+                |old| {
+                    let next = (old & SLOT_HAS_KEPT) | kind;
+                    (next != old).then_some(next)
+                },
+            );
+        }
+    }
+
+    fn clear_slot_null_kind(&self, index: u32) {
+        if let Some(s) = self.slot_state.get(index as usize)
+            && (s.load(std::sync::atomic::Ordering::Relaxed) & SLOT_NULL_MASK) != NULL_NONE
+        {
+            s.fetch_and(SLOT_HAS_KEPT, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    fn put_null_view(&self, index: u32) {
+        if self.slot_null_kind(index) == NULL_SRV_2D {
+            return;
+        }
+        null_view(self.at(index));
+        self.put(index);
+        self.set_slot_null_kind(index, NULL_SRV_2D);
+    }
+
+    fn put_null_for(&self, index: u32, view: &View) {
+        let kind = null_kind_for(view);
+        if self.slot_null_kind(index) == kind {
+            return;
+        }
+        null_for(view, self.at(index));
+        self.put(index);
+        self.set_slot_null_kind(index, kind);
+    }
+
     /// Makes slot `index` read nothing: a null view, or a plain sampler.
     pub(crate) fn make_null(&self, index: u32) {
         if self.sampler {
-            self.null_sampler(index);
+            if self.slot_null_kind(index) != NULL_SAMPLER {
+                self.null_sampler(index);
+                self.set_slot_null_kind(index, NULL_SAMPLER);
+            }
         } else {
-            null_view(self.at(index));
-            self.put(index);
+            self.put_null_view(index);
         }
         self.clear_twin(index);
         self.keep(index, None);
@@ -2935,15 +2997,31 @@ impl HostHeap {
 
     /// Slot `index` now views `resource` (or nothing of the host's).
     fn keep(&self, index: u32, resource: Option<ID3D12Resource>) {
+        if resource.is_none()
+            && self
+                .slot_state
+                .get(index as usize)
+                .is_some_and(|s| (s.load(std::sync::atomic::Ordering::Relaxed) & SLOT_HAS_KEPT) == 0)
+        {
+            return;
+        }
         let Some(slot) = self.kept.get(index as usize) else {
             return;
         };
+        let has_next = resource.is_some();
         let old = {
             use windows::core::Interface;
             let mut slot = slot.lock().unwrap_or_else(|e| e.into_inner());
             // The same again: nothing to retire.
             if slot.as_ref().map(Interface::as_raw) == resource.as_ref().map(Interface::as_raw) {
                 return;
+            }
+            if let Some(state) = self.slot_state.get(index as usize) {
+                if has_next {
+                    state.fetch_or(SLOT_HAS_KEPT, std::sync::atomic::Ordering::Relaxed);
+                } else {
+                    state.fetch_and(!SLOT_HAS_KEPT, std::sync::atomic::Ordering::Relaxed);
+                }
             }
             std::mem::replace(&mut *slot, resource)
         };
@@ -3142,6 +3220,9 @@ impl HostHeap {
     }
 
     fn copy_to(&self, to: u32, which: u32) {
+        if which == 0 {
+            self.clear_slot_null_kind(to);
+        }
         #[cfg(feature = "diagnostics")]
         if let Some(written) = self.written.get(to as usize) {
             written.store(crate::host::coarse_ms() as u32, std::sync::atomic::Ordering::Relaxed);
@@ -3376,20 +3457,25 @@ impl HostHeap {
             }
             self.quick_is(index, 0);
             self.made.set(index, if later { 0 } else { key });
-            let kept = if later {
-                None
+            if later {
+                if !self.sampler {
+                    self.put_null_for(index, &view);
+                }
+                self.clear_twin(index);
+                self.keep(index, None);
             } else {
-                make_twinned(&view, self.at(index), self.twin(index))
-            };
-            if kept.is_none() && !self.sampler {
-                null_for(&view, self.at(index));
+                let kept = make_twinned(&view, self.at(index), self.twin(index));
+                if kept.is_none() {
+                    if !self.sampler {
+                        self.put_null_for(index, &view);
+                    }
+                } else {
+                    self.put(index);
+                }
+                self.twin_made(index, kept.is_some() && twinned(&view));
+                self.keep(index, kept.flatten());
+                self.quick_is(index, key);
             }
-            if kept.is_some() || !self.sampler {
-                self.put(index);
-            }
-            self.twin_made(index, kept.is_some() && twinned(&view));
-            self.keep(index, kept.flatten());
-            self.quick_is(index, if later { 0 } else { key });
             drop(held);
             self.unmake_stale(index, stale);
         }
@@ -4836,6 +4922,63 @@ pub(crate) fn placed_texture(view: &View) -> Option<View> {
     Some(View::Shader(texture as usize, desc[..10].try_into().ok()))
 }
 
+const SLOT_HAS_KEPT: u8 = 0x80;
+const SLOT_NULL_MASK: u8 = 0x7F;
+const NULL_NONE: u8 = 0;
+const NULL_SRV_2D: u8 = 1;
+const NULL_SRV_BUFFER: u8 = 2;
+const NULL_CBV: u8 = 3;
+const NULL_UAV_BUFFER: u8 = 4;
+const NULL_UAV_2D: u8 = 5;
+const NULL_UAV_1D: u8 = 6;
+const NULL_UAV_1D_ARRAY: u8 = 7;
+const NULL_UAV_2D_ARRAY: u8 = 8;
+const NULL_UAV_3D: u8 = 9;
+// 10..=18: SRV null_like for texture dimensions 2..=10 (words[1] == 4 maps to NULL_SRV_2D).
+const NULL_SAMPLER: u8 = 19;
+
+fn null_like_kind(words: &[u32; 10]) -> u8 {
+    match words[1] {
+        4 => NULL_SRV_2D,
+        d @ 2..=10 => 10 + (d - 2) as u8,
+        _ => NULL_SRV_2D,
+    }
+}
+
+/// Identifies the exact null descriptor [`null_for`] writes for `view` so
+/// redundant null writes into a slot already holding that null kind can be
+/// skipped.
+fn null_kind_for(view: &View) -> u8 {
+    let is_buffer = |r: &usize| crate::resource::buffer_bytes(*r as crate::object::This).is_some();
+    let (buffer, dimension) = match view {
+        View::Unordered(r, _, desc) => (
+            desc.is_some_and(|d| d[1] == 1) || is_buffer(r),
+            desc.map(|d| d[1]),
+        ),
+        View::Placed(true, resource, desc) => (resource[0] == 1, Some(desc[1])),
+        View::Shader(r, desc) if desc.is_some_and(|d| d[1] == 1) || is_buffer(r) => {
+            return NULL_SRV_BUFFER;
+        }
+        View::Placed(false, resource, _) if resource[0] == 1 => return NULL_SRV_BUFFER,
+        View::Shader(_, Some(desc)) => return null_like_kind(desc),
+        View::Placed(false, _, desc) => {
+            return null_like_kind(desc[..10].try_into().unwrap_or(&[0; 10]));
+        }
+        View::Constant(..) => return NULL_CBV,
+        _ => return NULL_SRV_2D,
+    };
+    if buffer {
+        return NULL_UAV_BUFFER;
+    }
+    match dimension.map(|d| D3D12_UAV_DIMENSION(d as i32)) {
+        Some(D3D12_UAV_DIMENSION_TEXTURE1D) => NULL_UAV_1D,
+        Some(D3D12_UAV_DIMENSION_TEXTURE1DARRAY) => NULL_UAV_1D_ARRAY,
+        Some(D3D12_UAV_DIMENSION_TEXTURE2DARRAY) => NULL_UAV_2D_ARRAY,
+        Some(D3D12_UAV_DIMENSION_TEXTURE3D) => NULL_UAV_3D,
+        _ => NULL_UAV_2D,
+    }
+}
+
 /// A null view of the kind `view` is, for a slot whose view the host
 /// cannot make: unordered access (to a buffer or a 2D texture) or a shader
 /// view. Writes to it are dropped, reads give zeros.
@@ -4845,7 +4988,7 @@ fn null_for(view: &View, at: D3D12_CPU_DESCRIPTOR_HANDLE) {
     // Unordered views: whether a buffer, and the title's view dimension.
     let (buffer, dimension) = match view {
         View::Unordered(r, _, desc) => (
-            is_buffer(r) || desc.is_some_and(|d| d[1] == 1),
+            desc.is_some_and(|d| d[1] == 1) || is_buffer(r),
             desc.map(|d| d[1]),
         ),
         View::Placed(true, resource, desc) => (resource[0] == 1, Some(desc[1])),
@@ -4853,7 +4996,7 @@ fn null_for(view: &View, at: D3D12_CPU_DESCRIPTOR_HANDLE) {
         // a null 2D view where the shader expects a buffer is a mismatch
         // the hardware does not survive in general (GPU-based validation
         // reports it).
-        View::Shader(r, desc) if is_buffer(r) || desc.is_some_and(|d| d[1] == 1) => {
+        View::Shader(r, desc) if desc.is_some_and(|d| d[1] == 1) || is_buffer(r) => {
             return null_buffer_view(at);
         }
         View::Placed(false, resource, _) if resource[0] == 1 => return null_buffer_view(at),
