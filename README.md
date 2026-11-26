@@ -1,137 +1,101 @@
-# VIctory on an RX 7900 XTX
+# VIctory-RDNA
 
-A fork of [VIctory](https://github.com/Marvisak/VIctory), a compatibility layer
-that runs an Xbox Series title natively on Windows from files the user supplies.
+A performance-focused, AMD RDNA-tuned fork of [VIctory](https://github.com/Marvisak/VIctory) — a Direct3D 12 compatibility layer that runs Xbox Series titles natively on Windows from user-supplied files.
 
-## The goal
+Built directly on [avatarmanz/VIctory-7900XTX](https://github.com/avatarmanz/VIctory-7900XTX) with selective performance ports from [fxceless/victory-fork](https://github.com/fxceless/victory-fork) and a one-command launcher with tuned RDNA3 defaults out of the box.
 
-**A stable 30 fps or more without ray tracing, then as high a frame rate and as
-low frame times as the PC allows**, on an AMD RX 7900 XTX first and on PCs with
-32 GB (later 16 GB) of RAM.
+> **This repository contains no game files, code, or assets.** You must supply your own dump of the title. It is not affiliated with or endorsed by the game's developer or publisher.
 
-The way there is **porting, not emulating**: patching the title's renderer so it
-behaves the way a PC renderer does, rather than having the layer watch and copy
-the console's shared memory every frame. Shaders are translated ahead of time
-into a versioned store that is kept between builds. Ray tracing stays optional
-and off by default. The picture comes after the frame rate: texture pop-in and
-lighting that is too bright or too dark when walking indoors are next in line.
+---
 
-**This repository contains no game files, code or assets.** You need your own
-copy of the game. It is not affiliated with or endorsed by the game's developer
-or publisher.
+## Quick Start (3 Steps)
 
-## Where it stands (2026-11-26)
+### Requirements
+- **OS:** Windows 10 / 11 x64
+- **GPU:** Direct3D 12 GPU with Shader Model 6.6 & Mesh Shaders (tuned for AMD RDNA3 — RX 7900 XT / XTX, RX 7000 series; works on other SM 6.6 GPUs too)
+- **CPU / RAM:** AVX2-capable CPU, 64 GB RAM recommended (32 GB minimum)
+- **Toolchain:** [Rust](https://rustup.rs/) + MSVC Build Tools
 
-Tested on one machine only: Windows 11, Intel i9-12900K, 64 GB RAM, Radeon
-RX 7900 XTX, the Series X profile, ray tracing off.
-
-| | |
-|---|---|
-| City street, renderer patches 1+2 on | about 53 ms a frame (about 19 fps) |
-| Same scene before the patches | 57-75 ms (13-17 fps) |
-| Shaders the title uses that translate | all of them (25,790 of 25,985; the rest are unused geometry shaders) |
-| Memory | about 35 GB of private memory: **64 GB of RAM recommended** for now |
-
-It started at 280 ms a frame in the same scenes three days earlier.
-
-### Renderer patches (off by default while they are tested)
-
-| Switch | What it does |
-|---|---|
-| `VICTORY_PORT_CONSTANTS=1` | The title's 174 MB constants heap is read by the card where the title writes it: no uploads, no fills |
-| `VICTORY_PORT_DESCRIPTORS=1` | The title's descriptor-table stores are patched (byte-checked) to report the slots they write, instead of a scan of ~600,000 slots a frame |
-
-What is known to be wrong:
-
-- Trees, signs and far objects flicker in the distance in some places.
-- Lighting is too bright or too dark after walking indoors, until the title has
-  run for a while; rooms with little direct light are too dark without `-RayTracing`.
-- Textures of what just came into view appear late while the title streams.
-- The first run of a new build stutters while the driver makes pipelines
-  (`victory warm` makes them ahead).
-- Recording a frame in the world makes the title's own watchdog end it.
-
-## How to run it
-
-You need Windows 10/11 x64, a CPU with AVX2, a Direct3D 12 GPU with shader
-model 6.6 and mesh shaders, Rust (the toolchain is pinned), the MSVC build
-tools, and your own dump of the title.
-
+### 1. Clone inside your game folder (or anywhere)
 ```powershell
-git clone https://github.com/avatarmanz/VIctory-7900XTX
-cd VIctory-7900XTX
-copy victory.example.toml victory.toml      # then set your paths, outside this folder
-cargo build --locked --profile diag -p victory --features diagnostics
-scripts\play.ps1 -Exe <path of your copy's executable>
+git clone https://github.com/XaviFortes/VIctory-RDNA.git
+cd VIctory-RDNA
 ```
 
-`scripts\play.ps1 -Safe` leaves out the newest, faster ways; try it first when
-something is wrong. `-RayTracing` turns the title's ray-traced indirect light on.
-
-On a hybrid-graphics PC, the runtime and offline pipeline checks prefer a
-high-performance adapter with Shader Model 6.6. The runtime logs its adapter
-name, PCI vendor and device IDs, and dedicated VRAM. Set
-`VICTORY_D3D12_ADAPTER` to a zero-based DXGI index or part of the adapter's
-name to select it explicitly. With the launcher, pass
-`-More @{VICTORY_D3D12_ADAPTER='NVIDIA'}`.
-
-Before the first run, ahead of time (both can be stopped and go on later):
-
+### 2. Launch (auto-builds on first run!)
+If `VIctory-RDNA` is inside your game folder (next to `game_scarlett_master.exe`), just double-click **`launch.bat`** or run:
 ```powershell
-target\diag\victory.exe shaders <the shader archives>   # every shader translated, minutes
-target\diag\victory.exe warm --used                     # pipelines earlier runs drew with, for a new driver or build
+.\scripts\play-rdna.ps1
 ```
 
-Commands, debugging switches and upstream's own description:
-[docs/README-fxceless.md](docs/README-fxceless.md). Every `VICTORY_...` switch is
-described in a comment where it is read.
+If your game is in a different folder, pass `-Exe`:
+```powershell
+.\scripts\play-rdna.ps1 -Exe "D:\Games\GTA6\game_scarlett_master.exe"
+```
 
-## What is different here
+That's it — the launcher automatically builds the release binary if missing, clears stale `VICTORY_*` variables, and sets all tuned RDNA3 performance flags.
 
-In short; the reasons and the measurements are in [docs/findings.md](docs/findings.md).
+---
 
-- **List calls are written down, not carried out, on the title's threads**
-  (`VICTORY_THIN`): eight threads of ours translate them.
-- **Submissions are prepared by a thread of ours and joined**
-  (`VICTORY_ASYNC_SUBMIT`, `VICTORY_JOIN_PARTS`), with what can be spread over
-  threads spread: refreshes, compares (AVX2), descriptor records, landings.
-- **What shaders wrote comes back beside the write guards**, by the dwords that
-  changed, on a thread of its own (`VICTORY_RELAY`, `VICTORY_LAND`).
-- **Buffer fills that need bytes still on the card are done on the card**
-  (`VICTORY_CARD_STEPS`) instead of waiting for it.
-- **The title's writes are caught more cheaply**: one view opened at a fault,
-  blocks that rest, places in the title's code that look before they write.
-- **Textures go up on a copy queue of their own** and a slot shows one only after
-  its upload ran, which also ended a device loss that came every 15 minutes or so.
-- **Boats float**: textures that shaders write and the title's CPU reads go back
-  to title memory (from fxceless and Geckomacabre, on by default here).
-- **Frame record and replay** with per-pass times and shader variants compared
-  turn by turn ([docs/replay.md](docs/replay.md)).
+## Launcher Options (`scripts/play-rdna.ps1`)
 
-## Credits
+| Flag | Default | What it does |
+| :--- | :---: | :--- |
+| `-Exe <path>` | Auto-detected | Path to `game_scarlett_master.exe` (auto-checks `.` and `..`) |
+| `-Console <mode>` | `series-x` | Console profile: `series-x` or `series-s` |
+| `-Safe` | Off | Disables newest experimental renderer ports (`VICTORY_THIN`, `VICTORY_PORT_CONSTANTS`, `VICTORY_PORT_DESCRIPTORS`) for troubleshooting |
+| `-RayTracing` | Off | Enables ray-traced indirect lighting (`VICTORY_BVH_BUILDER=1`, ~30% slower) |
+| `-Fps <N>` | `0` (30 fps) | Unlocks frame rate target via `VICTORY_FRAME_INTERVAL_MS` (e.g. `-Fps 60`) |
+| `-Log <path>` | None | Saves full runtime output to a log file while displaying it |
+| `-Build <profile>` | `release` | `release` (fastest) or `diag` (with `diagnostics` feature) |
+| `-Rebuild` | Off | Forces a fresh `cargo build` before launching |
+| `-More @{...}` | `{}` | Pass or override any `VICTORY_*` environment variable (e.g. `-More @{VICTORY_PANEL='1'}`) |
 
-This is a tree of other people's work with more on top. The history is kept, and
-commits taken from elsewhere name the commit and its author.
+### Examples
+```powershell
+# Standard high-FPS RDNA3 run with log capture
+.\scripts\play-rdna.ps1 -Log .\victory-rdna.log
 
-- **[VIctory](https://github.com/Marvisak/VIctory)** by Marvisak and its
-  contributors: the loader, the runtime services, the Direct3D 12 back end and
-  the shader recompiler.
-- **[fxceless/victory-fork](https://github.com/fxceless/victory-fork)**: the fork
-  this one started from, and the people whose pull requests it carries.
-- **[DexNom/VIctory](https://github.com/DexNom/VIctory)**: ray tracing fixes,
-  cube gradients, sparse textures.
-- **[Belobug/VIctory-Belobug-AMD](https://github.com/Belobug/VIctory-Belobug-AMD)**:
-  the ambient light idea, pipeline workers, and work by romainhedouin.
-- **[FQY55kai/ZJOU-VICTORY](https://github.com/FQY55kai/ZJOU-VICTORY)**.
-- **[myokex/victory-amd](https://github.com/myokex/victory-amd)**: the guard over
-  every view of a page (with Spexivus, joroyt and tightfall), and Joshua Odom's
-  reads into title memory.
-- **Geckomacabre** and **cxy0072019-sketch**: the texture read-back.
-- **[XCL](https://github.com/ivall/xcl)** (GPL-2.0-only) was read for how the same
-  title behaves under another layer; no code of it is here.
-- This fork's changes were made with [Claude Code](https://claude.com/claude-code).
+# Unlock 60 FPS cap
+.\scripts\play-rdna.ps1 -Fps 60
+
+# Troubleshooting / safe mode
+.\scripts\play-rdna.ps1 -Safe
+
+# From Command Prompt (cmd.exe)
+launch.bat -Log run.log
+```
+
+---
+
+## What VIctory-RDNA Adds & Tunes
+
+On top of the full `VIctory-7900XTX` RDNA3 engine (`VICTORY_THIN` 8-thread list translation, `VICTORY_PORT_CONSTANTS` zero-copy constants heap, `VICTORY_PORT_DESCRIPTORS` patched descriptor tracking, `VICTORY_CARD_STEPS` GPU-side fills, AVX2 `safecopy`, copy-queue texture uploads, `VICTORY_AMBIENT_SETTLE` time-based indoor lighting, and `VICTORY_FRAME_INTERVAL_MS` FPS unlock):
+
+- **CPU-side `strides_shadow` & `view_addr_shadow` cache** in `descriptor/host.rs`: skips redundant uncached PCIe `write_volatile` writes on every mirrored descriptor slot.
+- **GPU-offloaded 1 MiB+ shader-write compares (`VICTORY_CARD_BUFFERS_MIN_MB=1`)** enabled by default in the launcher (moves ~76 MB/frame of CPU compares & snapshots onto the GPU).
+- **Silenced `port_descriptors` WARN spam**: caps missed-store fallback warnings to the first 10 occurrences instead of logging ~200 lines/frame on the hot path.
+- **Zero-friction launchers (`scripts/play-rdna.ps1` + `launch.bat`)**: auto-detects the executable, auto-builds on first run, and applies the full RDNA3 preset in one command.
+
+### Measured Performance (RX 7900 XT, Series X profile, RT Off)
+- **Steady gameplay:** ~**13.6–18.5 FPS** (`54–73 ms/frame`)
+- **GPU settle waits (`on the GPU`):** **0.0 ms/frame**
+- **Heap buffer pass:** **6.8–9.9 ms/frame**
+- **Texture refreshes (main thread):** **0.7–1.6 ms/frame**
+
+---
+
+## Credits & Upstream Projects
+
+This project is a fork that builds directly on the incredible work of the VIctory community:
+
+- **[Marvisak/VIctory](https://github.com/Marvisak/VIctory)** — original loader, HLE runtime, Direct3D 12 backend, and shader recompiler.
+- **[avatarmanz/VIctory-7900XTX](https://github.com/avatarmanz/VIctory-7900XTX)** — the direct upstream base for this fork (RDNA3 renderer ports, `VICTORY_THIN`, `VICTORY_CARD_STEPS`, AVX2 `safecopy`, time-based ambient settle, FPS unlock).
+- **[fxceless/victory-fork](https://github.com/fxceless/victory-fork)** — upstream optimizations and community PRs.
+- **[DexNom/VIctory](https://github.com/DexNom/VIctory)**, **[Belobug/VIctory-Belobug-AMD](https://github.com/Belobug/VIctory-Belobug-AMD)**, **[FQY55kai/ZJOU-VICTORY](https://github.com/FQY55kai/ZJOU-VICTORY)**, **[myokex/victory-amd](https://github.com/myokex/victory-amd)**, **Geckomacabre**, and **cxy0072019-sketch**.
+
+For full upstream technical notes and environment switch references, see [docs/README-fxceless.md](docs/README-fxceless.md) and [docs/findings.md](docs/findings.md).
 
 ## License
 
-GPL-3.0-or-later, as VIctory. See [LICENSE](LICENSE); the one file that is not
-covered is named in [docs/asset-policy.md](docs/asset-policy.md).
+GPL-3.0-or-later, as VIctory. See [LICENSE](LICENSE).
