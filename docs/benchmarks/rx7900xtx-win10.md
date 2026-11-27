@@ -36,7 +36,21 @@ In the last run the game reached scenes the cache had not seen yet: 92 of its 94
 
 - On the RDNA tree, `VICTORY_PORT_BUFFERS=1` + `VICTORY_INPLACE=2` take 3.2 ms off the CPU preparation at 1440p (27.2 -> 24.0 ms) and the frame gets 1.7 ms faster (35.2 -> 33.5 ms).
 - In the cross-build comparison, CPU preparation was faster (3.6-4.9 ms less), GPU utilization was higher (97% against 92% at 4K, 94% against 88% at 1440p), and overall frame time was slightly slower (0.7 ms at 1440p, 1.2 ms at 4K).
-- I did not run 4K without the two switches on the RDNA tree, so their effect at 4K on this tree is still open. A warm-cache 4K A/B on the same RDNA build with only these two switches changed is the next run.
+- At 4K the same two switches, on the same RDNA build, take 4.9 ms off the CPU preparation; the frame-time difference is small (see the next section).
+
+### 4K A/B on the same RDNA build: `VICTORY_PORT_BUFFERS` and `VICTORY_INPLACE`
+
+The same build as above (`2c5a395` + #165 + the `slot_story` fix, built as `7c3616d`), output 4K with render scale 0.5, ports 1, 2, 5, 6, 7 and the rest of the fast preset unchanged; only `VICTORY_PORT_BUFFERS=1` + `VICTORY_INPLACE=2` against both unset. `VICTORY_AB` cannot flip them on this tree (both are read once at start), so two 25-minute runs back to back on the same save, `warm --used` before each. Unlike the runs above, the boat was driven this time (scripted, following the mission marker), so the scenes are not the same in the two runs.
+
+| 5-second lines with 3,000-4,999 draws | BUFFERS + INPLACE | both unset |
+|---|---:|---:|
+| lines (samples) | 44 | 108 |
+| frame mean / median / p90 | 36.2 / 33.8 / 40.3 ms | 37.1 / 36.3 / 40.0 ms |
+| CPU preparation | 21.2 ms | 26.1 ms |
+| GPU utilization (median) | 96% | 91% |
+| shader misses / pipelines compiled by the end | 414 / 82 | 3 / 6 |
+
+With the two on, CPU preparation was 4.9 ms faster and GPU utilization higher; the frame was 0.9 ms faster on the mean and 2.5 ms on the median, with p90 the same. The "on" run went partly cold (the drive reached places the cache had not seen: 414 shader misses and 82 pipeline compiles) and has fewer measured lines, so the frame-time difference should be read as small, and the preparation difference as the solid part, in line with the 1440p pair above. Before the "off" run the `warm --used` pass found 83,574 pipelines known to the book, 3,542 of them still to make, which is why that run compiled almost nothing during play.
 
 ### Port 1 ordering in the preset
 
