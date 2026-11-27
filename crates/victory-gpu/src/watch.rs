@@ -747,11 +747,10 @@ fn kernel_written(first: usize, last: usize) -> Option<Vec<(usize, u16)>> {
 
 /// Ranges of one submission closer than this are asked about together
 /// (within the same `VirtualAlloc` reservation, so `GetWriteWatch` does not
-/// scan multi-megabyte unreferenced gaps or fail across reservation edges).
-const AHEAD_GAP: usize = (1 << 20) / PAGE;
-/// The most one asking covers so `spread_each` load-balances across worker
-/// threads instead of one thread scanning a huge reservation alone.
-const AHEAD_MAX: usize = (64 << 20) / PAGE;
+/// fail across reservation edges while keeping syscall count minimal).
+const AHEAD_GAP: usize = (8 << 20) / PAGE;
+/// The most one asking covers (its answer needs 8 bytes per 4 KiB page).
+const AHEAD_MAX: usize = (1 << 30) / PAGE;
 
 /// Cached `(alloc_base_page, end_page)` spans of write-watched reservations so
 /// `ask_once` never groups pieces from different `VirtualAlloc` reservations
