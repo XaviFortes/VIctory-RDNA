@@ -1547,7 +1547,11 @@ pub(crate) fn slot_story(slot: u32) -> String {
         let mut text = if index < host.count {
             format!("title slot {index}, made from {}", host.describe_slot(index).unwrap_or_default())
         } else {
-            let taken = host.next.lock().unwrap_or_else(|e| e.into_inner()).1.get((index - host.count) as usize).copied();
+            let i = (index - host.count) as usize;
+            let next = host.next.lock().unwrap_or_else(|e| e.into_inner());
+            // DynamicBits is packed: a slot is taken when [i, i + 1) holds a taken one.
+            let taken = (i < next.1.len).then(|| next.1.first_taken(i, i + 1).is_some());
+            drop(next);
             format!("dynamic slot {} (taken {taken:?})", index - host.count)
         };
         if twin {
