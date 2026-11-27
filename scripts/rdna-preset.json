@@ -23,6 +23,7 @@
   },
   "fast": {
     "VICTORY_THIN": "1",
+    "VICTORY_THIN_THREADS": "14",
     "VICTORY_JOIN_PARTS": "8",
     "VICTORY_UPLOAD_AHEAD": "1",
     "VICTORY_PORT_CONSTANTS": "1",
