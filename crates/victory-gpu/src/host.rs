@@ -5895,16 +5895,24 @@ impl Host {
         } else if ahead_of_writes() {
             batch.refresh_ahead(runs, |list, i| own.as_ref().is_some_and(|own| own.takes(list, i)));
         }
+        {
+            SUBMIT_PHASES[3].fetch_add(phase_t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        }
         stage.next("submit: the lists' steps");
+        let (mut deferred_ns, mut prelude_ns) = (0u64, 0u64);
         #[cfg_attr(not(feature = "diagnostics"), allow(clippy::unused_enumerate_index))]
         for (_run, list) in runs.iter().enumerate() {
+            let t0 = std::time::Instant::now();
             let uploads = list.run_deferred(&mut batch, &air, |i| own.as_ref().is_some_and(|own| own.takes(list, i)));
+            let t1 = std::time::Instant::now();
+            deferred_ns += (t1 - t0).as_nanos() as u64;
             firsts.push(lists.len());
             if let Some(prelude) = list.prelude(&uploads) {
                 #[cfg(feature = "diagnostics")]
                 marks.push((lists.len(), crate::copystat::Timed::Prelude));
                 lists.push(Some(prelude));
             }
+            prelude_ns += t1.elapsed().as_nanos() as u64;
             #[cfg(feature = "diagnostics")]
             marks.push((
                 lists.len(),
@@ -5915,13 +5923,16 @@ impl Host {
             ));
             lists.push(list.list.cast().ok());
         }
+        SUBMIT_PHASES[4].fetch_add(deferred_ns, Ordering::Relaxed);
+        SUBMIT_PHASES[5].fetch_add(prelude_ns, Ordering::Relaxed);
+        phase_t = std::time::Instant::now();
         batch.fill();
         stage.next("submit: the last refreshes");
         batch.flush();
         crate::watch::ask_once_end();
         {
             let now = std::time::Instant::now();
-            SUBMIT_PHASES[3].fetch_add((now - phase_t).as_nanos() as u64, Ordering::Relaxed);
+            SUBMIT_PHASES[6].fetch_add((now - phase_t).as_nanos() as u64, Ordering::Relaxed);
             phase_t = now;
         }
         #[cfg(feature = "diagnostics")]
@@ -5939,7 +5950,7 @@ impl Host {
         }
         {
             let now = std::time::Instant::now();
-            SUBMIT_PHASES[4].fetch_add((now - phase_t).as_nanos() as u64, Ordering::Relaxed);
+            SUBMIT_PHASES[7].fetch_add((now - phase_t).as_nanos() as u64, Ordering::Relaxed);
             phase_t = now;
         }
         #[cfg(feature = "diagnostics")]
@@ -5974,7 +5985,7 @@ impl Host {
         }
         {
             let now = std::time::Instant::now();
-            SUBMIT_PHASES[5].fetch_add((now - phase_t).as_nanos() as u64, Ordering::Relaxed);
+            SUBMIT_PHASES[8].fetch_add((now - phase_t).as_nanos() as u64, Ordering::Relaxed);
             phase_t = now;
         }
         #[cfg(feature = "diagnostics")]
@@ -5988,7 +5999,7 @@ impl Host {
         crate::descriptor::make_waiting();
         {
             let now = std::time::Instant::now();
-            SUBMIT_PHASES[6].fetch_add((now - phase_t).as_nanos() as u64, Ordering::Relaxed);
+            SUBMIT_PHASES[9].fetch_add((now - phase_t).as_nanos() as u64, Ordering::Relaxed);
             phase_t = now;
         }
         #[cfg(feature = "diagnostics")]
@@ -6037,7 +6048,7 @@ impl Host {
             }
             {
                 let now = std::time::Instant::now();
-                SUBMIT_PHASES[7].fetch_add((now - phase_t).as_nanos() as u64, Ordering::Relaxed);
+                SUBMIT_PHASES[10].fetch_add((now - phase_t).as_nanos() as u64, Ordering::Relaxed);
             }
             #[cfg(feature = "diagnostics")]
             split.part(5);
@@ -6966,10 +6977,13 @@ impl HostList {
         const COPY_SOURCE: u32 = 0x800;
         let host_state = |state: u32| D3D12_RESOURCE_STATES(state as i32);
         let states = self.states.lock().unwrap_or_else(|e| e.into_inner());
+        let twins = self.twins.lock().unwrap_or_else(|e| e.into_inner());
+        if uploads.is_empty() && twins.is_empty() && states.is_empty() {
+            return None;
+        }
         // The copies (depth texture, twin, whether into the twin); the
         // sides are then as this list leaves them.
         let mut syncs = Vec::new();
-        let twins = self.twins.lock().unwrap_or_else(|e| e.into_inner());
         for u in twins.values() {
             let real = u.twin.behind.load(Ordering::Relaxed);
             let mut behind = [real & 1 != 0, real & 2 != 0];
@@ -6984,6 +6998,39 @@ impl HostList {
             u.twin.behind.store(left, Ordering::Relaxed);
         }
         drop(twins);
+        // Fast path: no twin syncs and no texture uploads — check state transitions
+        // directly without allocating `aliasing`, `to_copy`, or `copying` HashMap.
+        if syncs.is_empty() && uploads.is_empty() {
+            let mut barriers = Vec::new();
+            for (first, last, copy) in states.values() {
+                let real = copy.state.swap(*last, Ordering::Relaxed);
+                if real != *first {
+                    barriers.push(transition(&copy.texture, host_state(real), host_state(*first)));
+                }
+            }
+            if barriers.is_empty() {
+                return None;
+            }
+            let Some((allocator, list)) = self
+                .prelude
+                .get_or_init(|| host().and_then(|h| h.make_prelude()))
+                .as_ref()
+            else {
+                fail(format_args!("no host list for a state prelude"));
+            };
+            // SAFETY: the prelude is not executing; the textures are live.
+            let recorded = unsafe {
+                allocator.Reset().and_then(|()| {
+                    list.Reset(allocator, None)?;
+                    list.ResourceBarrier(&barriers);
+                    list.Close()
+                })
+            };
+            if let Err(e) = recorded {
+                fail(format_args!("a host state prelude did not record ({e})"));
+            }
+            return list.cast().ok();
+        }
         // A copy runs with its textures in the copy states: each moves
         // there from its real state, and from there to the state the list
         // starts with (back to its real state if the list does not use it).
@@ -7903,8 +7950,8 @@ impl std::hash::Hasher for AddressHash {
 /// the flights waited for, the heaps' records and what is swept; and, at the
 /// end, the wait for the heaps' records.
 /// Lightweight per-phase release timers for `Host::submit` (nanoseconds):
-/// `[pre, ask_once, stale, steps+prelude, snapshots, card_before, heaps+waiting, send]`.
-static SUBMIT_PHASES: [std::sync::atomic::AtomicU64; 8] = [const { std::sync::atomic::AtomicU64::new(0) }; 8];
+/// `[pre, ask_once, stale, refresh_front, run_deferred, prelude, flush, snapshots, card_before, heaps+waiting, send]`.
+static SUBMIT_PHASES: [std::sync::atomic::AtomicU64; 11] = [const { std::sync::atomic::AtomicU64::new(0) }; 11];
 
 #[cfg(feature = "diagnostics")]
 static SPLIT: [std::sync::atomic::AtomicU64; 16] = [const { std::sync::atomic::AtomicU64::new(0) }; 16];
@@ -9474,12 +9521,12 @@ impl Meter {
             #[cfg(feature = "diagnostics")]
             split_line(frames);
             {
-                let p = [0, 1, 2, 3, 4, 5, 6, 7].map(|i| SUBMIT_PHASES[i].swap(0, Ordering::Relaxed) as f64 / 1e6 / frames);
+                let p = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(|i| SUBMIT_PHASES[i].swap(0, Ordering::Relaxed) as f64 / 1e6 / frames);
                 let tot: f64 = p.iter().sum();
                 if tot > 0.0 {
                     tracing::info!(
-                        "submitting phases per frame: pre {:.1} ms, ask_once {:.1}, stale {:.1}, steps+prelude {:.1}, snapshots {:.1}, card_before {:.1}, heaps+waiting {:.1}, send {:.1} (sum {:.1} ms)",
-                        p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], tot
+                        "submitting phases per frame: pre {:.1} ms, ask_once {:.1}, stale {:.1}, refresh_front {:.1}, run_deferred {:.1}, prelude {:.1}, flush {:.1}, snapshots {:.1}, card_before {:.1}, heaps+waiting {:.1}, send {:.1} (sum {:.1} ms)",
+                        p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], tot
                     );
                 }
             }

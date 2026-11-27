@@ -745,13 +745,70 @@ fn kernel_written(first: usize, last: usize) -> Option<Vec<(usize, u16)>> {
     })
 }
 
-/// Ranges of one submission closer than this are asked about together:
-/// walking the pages between them costs less than another kernel call (a
-/// call that resets written pages costs 30-70 microseconds whatever the
-/// range).
-const AHEAD_GAP: usize = (8 << 20) / PAGE;
-/// The most one asking covers (its answer needs 8 bytes per 4 KiB page).
-const AHEAD_MAX: usize = (1 << 30) / PAGE;
+/// Ranges of one submission closer than this are asked about together
+/// (within the same `VirtualAlloc` reservation, so `GetWriteWatch` does not
+/// scan multi-megabyte unreferenced gaps or fail across reservation edges).
+const AHEAD_GAP: usize = (1 << 20) / PAGE;
+/// The most one asking covers so `spread_each` load-balances across worker
+/// threads instead of one thread scanning a huge reservation alone.
+const AHEAD_MAX: usize = (64 << 20) / PAGE;
+
+/// Cached `(alloc_base_page, end_page)` spans of write-watched reservations so
+/// `ask_once` never groups pieces from different `VirtualAlloc` reservations
+/// into one failing `GetWriteWatch` call.
+static RESERVATIONS: RwLock<Vec<(usize, usize)>> = RwLock::new(Vec::new());
+
+/// Returns the `VirtualAlloc` allocation base (in 64 KiB pages) for `page`,
+/// using a cached sorted table and falling back to `VirtualQuery` on a miss.
+fn reservation_base(page: usize) -> usize {
+    {
+        let table = RESERVATIONS.read().unwrap_or_else(|e| e.into_inner());
+        let idx = table.partition_point(|&(start, _)| start <= page);
+        if idx > 0 {
+            let (start, end) = table[idx - 1];
+            if page < end {
+                return start;
+            }
+        }
+    }
+    use windows_sys::Win32::System::Memory::{MEMORY_BASIC_INFORMATION, VirtualQuery};
+    let mut mbi = std::mem::MaybeUninit::<MEMORY_BASIC_INFORMATION>::zeroed();
+    // SAFETY: `VirtualQuery` writes into `mbi` for the current process.
+    let ok = unsafe {
+        VirtualQuery(
+            (page * PAGE) as *const _,
+            mbi.as_mut_ptr(),
+            std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+        )
+    };
+    if ok == 0 {
+        return page;
+    }
+    // SAFETY: initialized by `VirtualQuery`.
+    let mbi = unsafe { mbi.assume_init() };
+    let base = (mbi.AllocationBase as usize) / PAGE;
+    let region_end = ((mbi.BaseAddress as usize).saturating_add(mbi.RegionSize)).div_ceil(PAGE);
+    if base < region_end {
+        let mut table = RESERVATIONS.write().unwrap_or_else(|e| e.into_inner());
+        let idx = table.partition_point(|&(start, _)| start < base);
+        if let Some(entry) = table.get_mut(idx)
+            && entry.0 == base
+        {
+            entry.1 = entry.1.max(region_end);
+        } else {
+            table.insert(idx, (base, region_end));
+        }
+    }
+    base
+}
+
+fn invalidate_reservation(page: usize) {
+    let mut table = RESERVATIONS.write().unwrap_or_else(|e| e.into_inner());
+    let idx = table.partition_point(|&(start, _)| start <= page);
+    if idx > 0 && page < table[idx - 1].1 {
+        table.remove(idx - 1);
+    }
+}
 /// Asks the kernel about many ranges `(start, end)` at once, before the
 /// [`writes`] of each: ranges close together are one asking, and `writes`
 /// then answers from the journal until [`ask_ahead_done`]. The world's
@@ -791,11 +848,13 @@ fn ask_ahead_held(ranges: &[(usize, usize)], held: bool) {
     let mut i = 0;
     while i < pieces.len() {
         let first = pieces[i].0;
+        let base = reservation_base(first);
         let mut last = pieces[i].1;
         let mut k = i + 1;
         while k < pieces.len()
             && pieces[k].0 <= last + AHEAD_GAP
             && last.max(pieces[k].1) - first <= AHEAD_MAX
+            && reservation_base(pieces[k].0) == base
         {
             last = last.max(pieces[k].1);
             k += 1;
@@ -1073,11 +1132,13 @@ pub(crate) fn ask_once(ranges: &[(usize, usize)]) {
     let mut i = 0;
     while i < pieces.len() {
         let first = pieces[i].0;
+        let base = reservation_base(first);
         let mut last = pieces[i].1;
         let mut k = i + 1;
         while k < pieces.len()
             && pieces[k].0 <= last + AHEAD_GAP
             && last.max(pieces[k].1) - first <= AHEAD_MAX
+            && reservation_base(pieces[k].0) == base
         {
             last = last.max(pieces[k].1);
             k += 1;
@@ -1143,6 +1204,7 @@ fn ask_run_all(pieces: &[(usize, usize)], asked: &mut Vec<(usize, usize)>, writt
         asked.push((first, last));
         return;
     }
+    invalidate_reservation(first);
     let (a, b) = pieces.split_at(pieces.len() / 2);
     ask_run_all(a, asked, written);
     ask_run_all(b, asked, written);
@@ -1325,6 +1387,7 @@ fn ask_run(pieces: &[(usize, usize)], asked: &mut Vec<(usize, usize)>, written: 
         asked.push((first, last));
         return;
     }
+    invalidate_reservation(first);
     let (a, b) = pieces.split_at(pieces.len() / 2);
     ask_run(a, asked, written);
     ask_run(b, asked, written);
