@@ -445,6 +445,9 @@ pub(crate) struct State {
     pipeline: usize,
     /// View heap, sampler heap.
     heaps: [usize; 2],
+    /// Cached `&'static Heap` pointers for `heaps` (avoids global heap-map
+    /// lookups on every `heap_of` / `tables` / `early_textures` call).
+    bound_heaps: [Option<&'static crate::descriptor::Heap>; 2],
     graphics: Vec<Root>,
     compute: Vec<Root>,
     vertex: [VertexView; 32],
@@ -1228,10 +1231,13 @@ impl State {
 
     pub(crate) fn set_heaps(&mut self, heaps: &[This]) {
         self.heaps = [0; 2];
+        self.bound_heaps = [None; 2];
         for &h in heaps {
             if !h.is_null() {
-                let samplers = crate::descriptor::heap(h).samplers();
-                self.heaps[usize::from(samplers)] = h as usize;
+                let heap = crate::descriptor::heap(h);
+                let idx = usize::from(heap.samplers());
+                self.heaps[idx] = h as usize;
+                self.bound_heaps[idx] = Some(heap);
             }
         }
     }
@@ -1601,11 +1607,12 @@ impl State {
     }
 
     /// The bound heap holding `handle`.
+    #[inline]
     fn heap_of(&self, handle: u64) -> Option<&'static crate::descriptor::Heap> {
-        self.heaps
+        self.bound_heaps
             .iter()
-            .filter(|&&h| h != 0)
-            .map(|&h| crate::descriptor::heap(h as This))
+            .flatten()
+            .copied()
             .find(|h| h.index(handle).is_some())
     }
 
@@ -1726,6 +1733,7 @@ impl State {
         {
             once!("a dispatch without a view heap that needs one gets the title's");
             self.heaps[0] = heap;
+            self.bound_heaps[0] = Some(crate::descriptor::heap(heap as This));
         }
         // Heaps first: a root signature with directly indexed heaps must be
         // set after them, with both a view heap and a sampler heap bound.
@@ -1736,11 +1744,7 @@ impl State {
         if (fallback && !self.host_heaps_set) || self.host_heaps != self.heaps {
             let mut view_heap: Option<ID3D12DescriptorHeap> = None;
             let mut sampler_heap: Option<ID3D12DescriptorHeap> = None;
-            for &h in &self.heaps {
-                if h == 0 {
-                    continue;
-                }
-                let title_heap = crate::descriptor::heap(h as This);
+            for title_heap in self.bound_heaps.iter().flatten().copied() {
                 if let Some(host_heap) = title_heap.host() {
                     if title_heap.samplers() {
                         sampler_heap = Some(host_heap.heap.clone());
@@ -1755,18 +1759,21 @@ impl State {
             if fallback && sampler_heap.is_none() {
                 sampler_heap = crate::host::host().and_then(|h| h.fallback_sampler_heap().cloned());
             }
-            let mut heaps: Vec<Option<ID3D12DescriptorHeap>> = Vec::with_capacity(2);
+            let mut heaps: [Option<ID3D12DescriptorHeap>; 2] = [None, None];
+            let mut n_heaps = 0;
             if let Some(h) = view_heap {
                 list.keep(&h);
-                heaps.push(Some(h));
+                heaps[n_heaps] = Some(h);
+                n_heaps += 1;
             }
             if let Some(h) = sampler_heap {
                 list.keep(&h);
-                heaps.push(Some(h));
+                heaps[n_heaps] = Some(h);
+                n_heaps += 1;
             }
-            if !heaps.is_empty() {
+            if n_heaps > 0 {
                 // SAFETY: an open list and shader-visible heaps.
-                unsafe { l.SetDescriptorHeaps(&heaps) };
+                unsafe { l.SetDescriptorHeaps(&heaps[..n_heaps]) };
             }
             self.host_heaps = self.heaps;
             self.host_heaps_set = true;
@@ -2299,13 +2306,7 @@ impl State {
         } else {
             return;
         };
-        let Some(heap) = self
-            .heaps
-            .iter()
-            .filter(|&&h| h != 0)
-            .map(|&h| crate::descriptor::heap(h as This))
-            .find(|h| !h.samplers())
-        else {
+        let Some(heap) = self.bound_heaps[0] else {
             return;
         };
         let Some(host) = heap.host() else {
@@ -3650,20 +3651,17 @@ impl State {
             let Some(host) = heap.host() else {
                 continue;
             };
-            let mut selected: Vec<u32> = group
-                .indexed
-                .iter()
-                .map(|index| {
-                    let constant = self.user_value(
-                        compute,
-                        index.constant_slot,
-                        RootType::Constants,
-                        index.constant_dword,
-                    );
-                    // The shader adds i32 byte offsets and shifts by 5.
-                    index.byte_offset.wrapping_add(constant << index.shift) / 32
-                })
-                .collect();
+            let mut selected: Few<u32, 16> = Few::default();
+            for index in &group.indexed {
+                let constant = self.user_value(
+                    compute,
+                    index.constant_slot,
+                    RootType::Constants,
+                    index.constant_dword,
+                );
+                // The shader adds i32 byte offsets and shifts by 5.
+                selected.push(index.byte_offset.wrapping_add(constant << index.shift) / 32);
+            }
             selected.sort_unstable();
             selected.dedup();
             let n = (group.max_dword / 8).max(selected.last().copied().unwrap_or(0)) + 1;
@@ -3709,7 +3707,7 @@ impl State {
                         readable(list, u.kind, &view);
                     }
                 }
-                for k in selected {
+                for &k in selected.iter() {
                     if group.entry(k).is_some() {
                         continue;
                     }
@@ -4552,6 +4550,27 @@ impl<T: Copy, const N: usize> Few<T, N> {
             }
             self.many.push(what);
         }
+    }
+
+    fn dedup(&mut self)
+    where
+        T: PartialEq,
+    {
+        if !self.many.is_empty() {
+            self.many.dedup();
+            return;
+        }
+        if self.len <= 1 {
+            return;
+        }
+        let mut w = 1;
+        for r in 1..self.len {
+            if self.few[r] != self.few[w - 1] {
+                self.few[w] = self.few[r];
+                w += 1;
+            }
+        }
+        self.len = w;
     }
 }
 
