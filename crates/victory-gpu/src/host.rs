@@ -5728,6 +5728,7 @@ impl Host {
         let mut stage = crate::timeline::span("submit: the submission lock");
         let mut submitted = self.submitted.lock().unwrap_or_else(|e| e.into_inner());
         let was_working = working(true);
+        let phase_pre = std::time::Instant::now();
         submitting(1, runs.len());
         #[cfg(feature = "diagnostics")]
         let ahead = Split::begin();
@@ -5807,6 +5808,8 @@ impl Host {
         // The ranges shaders write are counted for it (with the relay).
         crate::shadow::preparing(this_submission);
         let started = std::time::Instant::now();
+        SUBMIT_PHASES[0].fetch_add((started - phase_pre).as_nanos() as u64, Ordering::Relaxed);
+        let mut phase_t = started;
         #[cfg(feature = "diagnostics")]
         ahead.part(14);
         #[cfg(feature = "diagnostics")]
@@ -5848,6 +5851,11 @@ impl Host {
             SPLIT[8].fetch_add(split.so_far(), Ordering::Relaxed);
             stage.next("submit: asking the write watch");
             crate::watch::ask_once(&ranges);
+            {
+                let now = std::time::Instant::now();
+                SUBMIT_PHASES[1].fetch_add((now - phase_t).as_nanos() as u64, Ordering::Relaxed);
+                phase_t = now;
+            }
             #[cfg(feature = "diagnostics")]
             split.part(0);
             stage.next("submit: title bytes under flights' writes");
@@ -5871,6 +5879,11 @@ impl Host {
             let settling = std::time::Instant::now();
             self.settle(&mut submitted, WHY_STALE);
             settled += settling.elapsed();
+        }
+        {
+            let now = std::time::Instant::now();
+            SUBMIT_PHASES[2].fetch_add((now - phase_t).as_nanos() as u64, Ordering::Relaxed);
+            phase_t = now;
         }
         #[cfg(feature = "diagnostics")]
         split.part(1);
@@ -5906,6 +5919,11 @@ impl Host {
         stage.next("submit: the last refreshes");
         batch.flush();
         crate::watch::ask_once_end();
+        {
+            let now = std::time::Instant::now();
+            SUBMIT_PHASES[3].fetch_add((now - phase_t).as_nanos() as u64, Ordering::Relaxed);
+            phase_t = now;
+        }
         #[cfg(feature = "diagnostics")]
         split.part(2);
         stage.next("submit: snapshots");
@@ -5918,6 +5936,11 @@ impl Host {
             crate::shadow::take_snapshots();
             #[cfg(feature = "diagnostics")]
             crate::copystat::add(crate::copystat::C::SnapshotUs, snapshots.elapsed().as_micros() as u64);
+        }
+        {
+            let now = std::time::Instant::now();
+            SUBMIT_PHASES[4].fetch_add((now - phase_t).as_nanos() as u64, Ordering::Relaxed);
+            phase_t = now;
         }
         #[cfg(feature = "diagnostics")]
         split.part(3);
@@ -5949,6 +5972,11 @@ impl Host {
             marks.push((lists.len(), crate::copystat::Timed::Compare));
             lists.push(Some(check));
         }
+        {
+            let now = std::time::Instant::now();
+            SUBMIT_PHASES[5].fetch_add((now - phase_t).as_nanos() as u64, Ordering::Relaxed);
+            phase_t = now;
+        }
         #[cfg(feature = "diagnostics")]
         split.part(4);
         stage.next("submit: waiting for the heaps' records");
@@ -5958,6 +5986,11 @@ impl Host {
         // The slots that waited for a texture's host copy, before the
         // lists that may read them run.
         crate::descriptor::make_waiting();
+        {
+            let now = std::time::Instant::now();
+            SUBMIT_PHASES[6].fetch_add((now - phase_t).as_nanos() as u64, Ordering::Relaxed);
+            phase_t = now;
+        }
         #[cfg(feature = "diagnostics")]
         split.part(15);
         let prepared = std::time::Instant::now();
@@ -6001,6 +6034,10 @@ impl Host {
             stage.next("submit: noting what is in the air");
             if let Err(e) = signalled {
                 fail(format_args!("a submission sent ahead could not be followed by a signal ({e})"));
+            }
+            {
+                let now = std::time::Instant::now();
+                SUBMIT_PHASES[7].fetch_add((now - phase_t).as_nanos() as u64, Ordering::Relaxed);
             }
             #[cfg(feature = "diagnostics")]
             split.part(5);
@@ -7865,6 +7902,10 @@ impl std::hash::Hasher for AddressHash {
 /// the submission lock, the steps done on the card planned ([`card_steps`]),
 /// the flights waited for, the heaps' records and what is swept; and, at the
 /// end, the wait for the heaps' records.
+/// Lightweight per-phase release timers for `Host::submit` (nanoseconds):
+/// `[pre, ask_once, stale, steps+prelude, snapshots, card_before, heaps+waiting, send]`.
+static SUBMIT_PHASES: [std::sync::atomic::AtomicU64; 8] = [const { std::sync::atomic::AtomicU64::new(0) }; 8];
+
 #[cfg(feature = "diagnostics")]
 static SPLIT: [std::sync::atomic::AtomicU64; 16] = [const { std::sync::atomic::AtomicU64::new(0) }; 16];
 
@@ -9432,6 +9473,16 @@ impl Meter {
             crate::shadow::back_line(frames);
             #[cfg(feature = "diagnostics")]
             split_line(frames);
+            {
+                let p = [0, 1, 2, 3, 4, 5, 6, 7].map(|i| SUBMIT_PHASES[i].swap(0, Ordering::Relaxed) as f64 / 1e6 / frames);
+                let tot: f64 = p.iter().sum();
+                if tot > 0.0 {
+                    tracing::info!(
+                        "submitting phases per frame: pre {:.1} ms, ask_once {:.1}, stale {:.1}, steps+prelude {:.1}, snapshots {:.1}, card_before {:.1}, heaps+waiting {:.1}, send {:.1} (sum {:.1} ms)",
+                        p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], tot
+                    );
+                }
+            }
             {
                 let [passes, pieces, compares] = [0, 1, 2].map(|i| CARD_PASSES[i].swap(0, Ordering::Relaxed) as f64 / frames);
                 if passes + compares > 0.0 {
