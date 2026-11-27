@@ -7957,6 +7957,10 @@ impl std::hash::Hasher for AddressHash {
 /// `[pre, ask_once, stale, refresh_front, run_deferred, prelude, flush, snapshots, card_before, heaps+waiting, send]`.
 static SUBMIT_PHASES: [std::sync::atomic::AtomicU64; 11] = [const { std::sync::atomic::AtomicU64::new(0) }; 11];
 
+/// Top copied buffers (`>= 64 KiB` per refresh) for identifying `refresh_front` copy traffic:
+/// `(start, len, carded) -> (bytes, us, count)`.
+static TOP_COPIES: Mutex<Option<std::collections::HashMap<(u64, u64, bool), (u64, u64, u64)>>> = Mutex::new(None);
+
 #[cfg(feature = "diagnostics")]
 static SPLIT: [std::sync::atomic::AtomicU64; 16] = [const { std::sync::atomic::AtomicU64::new(0) }; 16];
 
@@ -8604,6 +8608,17 @@ impl Batch {
         crate::copystat::range(from, to - from, us, 0);
         PREPARING[0].fetch_add(us, Ordering::Relaxed);
         PREPARING[1].fetch_add(copied as u64, Ordering::Relaxed);
+        if copied >= 65536 {
+            let (start, len) = shadow.span();
+            let mut top = TOP_COPIES.lock().unwrap_or_else(|e| e.into_inner());
+            let entry = top
+                .get_or_insert_with(Default::default)
+                .entry((start, len, shadow.carded()))
+                .or_default();
+            entry.0 += copied as u64;
+            entry.1 += us;
+            entry.2 += 1;
+        }
     }
 
     /// Whether `staging` is still to be refreshed in this submission (and
@@ -9542,6 +9557,27 @@ impl Meter {
                         p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], tot
                     );
                 }
+            }
+            if let Some(map) = TOP_COPIES.lock().unwrap_or_else(|e| e.into_inner()).take()
+                && !map.is_empty()
+            {
+                let mut rows: Vec<_> = map.into_iter().collect();
+                rows.sort_unstable_by_key(|(_, (b, _, _))| std::cmp::Reverse(*b));
+                let summary: Vec<String> = rows
+                    .iter()
+                    .take(6)
+                    .map(|((start, len, carded), (b, us, n))| {
+                        format!(
+                            "{start:#x}({:.1}MB,{}): {:.1}MB/{:.1}ms/{:.1}x",
+                            *len as f64 / (1024.0 * 1024.0),
+                            if *carded { "vram" } else { "pc" },
+                            *b as f64 / (1024.0 * 1024.0) / frames,
+                            *us as f64 / 1000.0 / frames,
+                            *n as f64 / frames,
+                        )
+                    })
+                    .collect();
+                tracing::info!("top copied buffers per frame (>=64KiB): {}", summary.join("; "));
             }
             {
                 let [passes, pieces, compares] = [0, 1, 2].map(|i| CARD_PASSES[i].swap(0, Ordering::Relaxed) as f64 / frames);

@@ -38,7 +38,7 @@ use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::Direct3D12::D3D12_VIEWPORT;
 
 /// Words after which a stream is handed to the translating threads.
-const CHUNK: usize = 2048;
+const CHUNK: usize = 1024;
 
 /// Whether list calls are only written down (`VICTORY_THIN=1`; needs the line
 /// of submissions, which it turns on).
