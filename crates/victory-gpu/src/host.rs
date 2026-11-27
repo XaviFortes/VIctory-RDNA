@@ -7751,13 +7751,14 @@ impl HostList {
         let (mut us, mut bytes) = (std::time::Duration::ZERO, 0u64);
         #[cfg(feature = "diagnostics")]
         let (mut copies, mut refreshes, mut refreshed) = (0u64, 0u64, 0u64);
-        let mut textures: Vec<crate::texture::PreludeUpload> = Vec::new();
-        for (i, step) in self.deferred().copies.iter().enumerate() {
-            if matches!(step, Step::Copy(..) | Step::Fill(..)) && taken(i) {
-                continue;
-            }
+        let deferred = self.deferred();
+        let mut textures = Vec::new();
+        for (i, step) in deferred.copies.iter().enumerate() {
             let (started, copied) = match step {
                 &Step::Copy(dst, src, len) => {
+                    if taken(i) {
+                        continue;
+                    }
                     let started = std::time::Instant::now();
                     #[cfg(feature = "diagnostics")]
                     {
@@ -7785,6 +7786,9 @@ impl HostList {
                     (started, len)
                 }
                 &Step::Fill(dst, src, len, _) => {
+                    if taken(i) {
+                        continue;
+                    }
                     #[cfg(feature = "diagnostics")]
                     {
                         copies += 1;
@@ -7875,7 +7879,7 @@ impl HostList {
                     if batch.texture_due(&upload.staging) {
                         batch.due.push(upload.staging.clone());
                     }
-                    textures.push(upload.clone());
+                    textures.push(upload);
                     continue;
                 }
             };
@@ -7895,11 +7899,12 @@ impl HostList {
         // Finish refreshing any textures not already refreshed in `refresh_front`
         // (or invalidated by a title write), then claim the ones whose staging
         // buffer changed so `self.prelude` uploads them on this exact submission.
+        // Only uploads handed to the prelude need their own references.
         batch.refresh_textures();
         let mut uploads = Vec::new();
         for upload in textures {
             if let Some(first_upload) = upload.finish_refresh() {
-                uploads.push((upload, first_upload));
+                uploads.push((upload.clone(), first_upload));
             }
         }
         uploads
@@ -8552,13 +8557,13 @@ impl Batch {
                 return;
             }
         }
-        match self.index.get(&key) {
-            Some(&at) => {
-                let r = &mut self.refreshes[at];
+        match self.index.entry(key) {
+            std::collections::hash_map::Entry::Occupied(entry) => {
+                let r = &mut self.refreshes[*entry.get()];
                 (r.1, r.2) = (r.1.min(address), r.2.max(end));
             }
-            None => {
-                self.index.insert(key, self.refreshes.len());
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(self.refreshes.len());
                 self.refreshes.push((shadow.clone(), address, end));
             }
         }

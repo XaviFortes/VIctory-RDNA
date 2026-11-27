@@ -818,7 +818,12 @@ fn claim_upload(
     uploaded: &std::sync::atomic::AtomicBool,
     dirty: &std::sync::atomic::AtomicBool,
 ) -> Option<bool> {
-    use std::sync::atomic::Ordering::AcqRel;
+    use std::sync::atomic::Ordering::{AcqRel, Acquire};
+    // The submitting thread claims after refresh. Clean, previously uploaded
+    // staging buffers need no atomic writes on each list that samples them.
+    if uploaded.load(Acquire) && !dirty.load(Acquire) {
+        return None;
+    }
     let was_uploaded = uploaded.swap(true, AcqRel);
     let was_dirty = dirty.swap(false, AcqRel);
     (!was_uploaded || was_dirty).then_some(!was_uploaded)
