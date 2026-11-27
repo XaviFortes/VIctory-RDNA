@@ -18,11 +18,25 @@ Frame time is the mean of the 5-second host lines with 3,000 to 4,999 draws (125
 | 2560x1440 | 33.5 ms, prep 24.0 ms, card 94% | 32.8 ms, prep 27.6 ms, card 88% |
 | 2560x1440, without `PORT_BUFFERS` and `INPLACE` | 35.2 ms, prep 27.2 ms | |
 
+### Shader and pipeline caches
+
+Every run started with warm caches. Both trees read the same `victory.toml`, so they share one cache folder: the shader translations and the host pipeline library (`pipelines/host-pipelines.bin`) were already filled by earlier runs on the same save that day. The counters below are the last ones each run logged (`shaders from the cache and translated so far`, and `loaded` / `made` of the pipeline library). I did not check the driver's own disk cache.
+
+| Run, in the order they ran | Shaders from the cache / translated in the run | Pipelines loaded from the library / compiled in the run | State |
+|---|---:|---:|---|
+| avatarmanz, 4K | 3103 / 2 | 2839 / 3 | warm |
+| avatarmanz, 1440p | 3105 / 7 | 2844 / 4 | warm |
+| RDNA, 4K | 3115 / 4 | 2853 / 0 | warm |
+| RDNA, 1440p | 3119 / 1 | 2863 / 1 | warm |
+| RDNA, 1440p without the two switches | 3120 / 130 | 2871 / 94 | warm for the first 13 min, then partly cold |
+
+In the last run the game reached scenes the cache had not seen yet: 92 of its 94 pipeline compiles came between 13.7 and 17.1 min in, and the translated shaders went from 1 to 130 by 17.9 min. 11 of its 144 measured lines fall between 13.7 and 18.5 min; without them the run's mean stays at 35.2 ms (prep 27.3 ms).
+
 ### What it looks like from here
 
 - On the RDNA tree, `VICTORY_PORT_BUFFERS=1` + `VICTORY_INPLACE=2` take 3.2 ms off the CPU preparation at 1440p (27.2 -> 24.0 ms) and the frame gets 1.7 ms faster (35.2 -> 33.5 ms).
-- Against the avatarmanz tree the RDNA tree prepares 3.6-4.9 ms less, but the frame is not faster: 0.7 ms slower at 1440p, 1.2 ms slower at 4K with the card at 97%. The time moved from the CPU to the card, and at 4K the card is close to full.
-- I did not run 4K without the two switches on the RDNA tree, so whether they are a net loss there is still open.
+- In the cross-build comparison, CPU preparation was faster (3.6-4.9 ms less), GPU utilization was higher (97% against 92% at 4K, 94% against 88% at 1440p), and overall frame time was slightly slower (0.7 ms at 1440p, 1.2 ms at 4K).
+- I did not run 4K without the two switches on the RDNA tree, so their effect at 4K on this tree is still open. A warm-cache 4K A/B on the same RDNA build with only these two switches changed is the next run.
 
 ### Port 1 ordering in the preset
 
