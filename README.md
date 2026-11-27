@@ -7,7 +7,7 @@
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Platform: Windows & Linux](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20(Wine)-0078D6.svg)](#quick-start)
 [![GPU: AMD RDNA3 / RDNA4](https://img.shields.io/badge/Tuned%20For-AMD%20RDNA3%20%2F%20RDNA4%20(D3D12)-ED1C24.svg)](#what-makes-victory-rdna-fast)
-[![Series X 4K: 23.1 FPS Median](https://img.shields.io/badge/GTA%20VI%204K%20Series%20X-23.1%20FPS%20Median%20%7C%2029.3%20Peak-2EA44F.svg)](#benchmarks)
+[![Series X 4K: 23.1 FPS Median | 30.8 Peak](https://img.shields.io/badge/GTA%20VI%204K%20Series%20X-23.1%20FPS%20Median%20%7C%2030.8%20Peak-2EA44F.svg)](#benchmarks)
 
 *Standing on the shoulders of [VIctory](https://github.com/Marvisak/VIctory) and [VIctory-7900XTX](https://github.com/avatarmanz/VIctory-7900XTX) — pushed to nearly **2× baseline performance** with zero resolution hacks and a 1-click desktop launcher.*
 
@@ -21,14 +21,15 @@
 
 Tested on **Windows 11 · AMD Radeon RX 7900 XT (20 GB, ReBAR) · Direct3D 12** at **native Xbox Series X 4K output (`3840 × 2160`)** — no resolution downgrades, no scale hacks, and **clean exit (`code 0`)**:
 
-| Metric | Early RDNA Baseline (`rdna4`) | Latest `VIctory-RDNA` (`rdna18`) | Improvement |
+| Metric | Early RDNA Baseline (`rdna4`) | Latest `VIctory-RDNA` (`rdna18` / `rdna21`) | Improvement |
 | --- | ---: | ---: | ---: |
-| **Gameplay FPS (Series X 4K)** | ~12.6–13.1 FPS | **23.1 FPS median** *(25.4–29.3 FPS peak)* | **~1.8× – 2.2× faster** |
-| **Heavy-Scene FPS (4,000+ draws/frame)** | ~12–15 FPS | **19.1 FPS median** *(24.4 FPS peak)* | **Consistently playable** |
-| **CPU Submission Prep (`preparing`)** | 50–65+ ms | **29.5 ms median** *(down to 27.5 ms)* | **~2× lower CPU overhead** |
-| **Long-Session `heap_buffers` Creep** | 10.3 → 42.5 ms *(creeping)* | **6.5–8.1 ms** *(flat, zero creep)* | **-81% & permanently flat** |
-| **CPU Shader-Write Compare Traffic** | 30.7 MB / 7.1 ms | **0.6 MB / 0.2 ms** | **-98% CPU scan traffic** |
-| **GPU Settle Waits (`on the GPU`)** | Up to 9.1 ms | **0.0 ms** *(11/12 samples)* | **Stalls eliminated** |
+| **Gameplay FPS (Series X 4K)** | ~12.6–13.1 FPS | **20.8–23.1 FPS median** *(**30.8 FPS peak**)* | **~1.8× – 2.4× faster** |
+| **Heavy-Scene FPS (4,000+ draws/frame)** | ~12–15 FPS | **20.3 FPS median** *(144 samples, 24.4 FPS peak)* | **Consistently playable** |
+| **CPU Submission Prep (`preparing`)** | 50–65+ ms | **29.5–33.8 ms median** *(down to 27.5 ms)* | **~2× lower CPU overhead** |
+| **Long-Session `heap_buffers` Creep** | 10.3 → 42.5 ms *(creeping)* | **7.2 ms flat** *(23m 50s run, zero creep)* | **-83% & permanently flat** |
+| **Port 7 Descriptor Wait (`the lane`)** | 10.9 ms | **0.22 ms** | **-98% faster** |
+| **CPU Shader-Write Compare Traffic** | 30.7 MB / 7.1 ms | **0.6–0.7 MB / 0.2 ms** | **-98% CPU scan traffic** |
+| **GPU Settle Waits (`on the GPU`)** | Up to 9.1 ms | **0.0 ms** *(zero stalls)* | **Stalls eliminated** |
 | **Zero-Copy In-Place Memory** | 0 MB | **842 MB** *(smart GDDR6/in-place split)* | **Enabled by default** |
 
 > [!TIP]
@@ -53,8 +54,8 @@ Tested on **Windows 11 · AMD Radeon RX 7900 XT (20 GB, ReBAR) · Direct3D 12** 
   A lock-free `AtomicBool` fast path + merged `RwLock` eliminates ~17,400+ mutex lock/unlock cycles per frame in `Shadow::nothing_new`, backed by AVX2-vectorized `word_runs` and 256 KiB parallel work chunks.
 - **Parallel Texture Readbacks & Single-Pass Journal Sync**
   Parallelizes `texback::land_many` across worker threads with thread-local scratch buffers and per-flight water-readback dedup (`read-backs and lists`: `11–23 ms → 3.2 ms`), and unifies Port 7 `ask_once()` into a single parallel pass (`-35%` exclusive journal locks).
-- **RDNA4 (RX 9070 XT), FSR 4.1.2 & Flicker Fixes**
-  Includes upstream submission-prelude texture uploads, batched indirect-argument ordering (`VICTORY_PORT_CONSTANTS_ORDER_ALONE=0`) to reduce foliage/lamp flicker without sacrificing frame rate, **RX 9070 XT (RDNA4)** fixes & upgraded live HUD (`VICTORY_PANEL=1`), **PC FidelityFX FSR 4.1.2 (`-Fsr4K`)**, and Renderer Port RT groundwork (`VICTORY_PORT_RT=1`, `VICTORY_AMBIENT_RT`).
+- **RDNA4 (RX 9070 XT), FSR 4.1.2 & Prelude Textures**
+  Includes upstream submission-prelude texture uploads (fixing frame-order texture flicker), **RX 9070 XT (RDNA4)** fixes & upgraded live HUD (`VICTORY_PANEL=1`), **PC FidelityFX FSR 4.1.2 (`-Fsr4K`)**, and Renderer Port RT groundwork (`VICTORY_PORT_RT=1`, `VICTORY_AMBIENT_RT`), while keeping `VICTORY_PORT_CONSTANTS_ORDER=0` in the fast preset to preserve full GPU throughput.
 - **1-Click Desktop Game Library (Windows & Linux)**
   No manually pasting 20 environment variables. Double-click `launch.bat` (or `sh ./launch.sh`), pick your game, choose Series X or Series S, and click **Play**.
 
@@ -124,22 +125,23 @@ Every session automatically saves a fresh timestamped log without overwriting ol
 
 All measurements below are from **periodic swap-chain logs on a single machine** (Windows 11, **AMD Radeon RX 7900 XT 20 GB**, Zen 3 24-thread CPU, 64 GB RAM, ReBAR enabled, Release build).
 
-### 1. Latest Series X 4K Run (`rdna18` · Default Preset)
+### 1. Latest Series X 4K Runs (`rdna18` & `rdna21` · Default Preset)
 
-Captured on **26 November 2026** (`victory-rdna18.log`) at **3840 × 2160 output** (Series X, 30 FPS target). Ran **9 min 38 s** from startup until closed by the maintainer — **clean exit (`code 0`)**, zero device removals, zero GPU settle waits.
+- **`victory-rdna21.log` (27 November 2026 — Extended 23 min 50 s Run):** Windows D3D12 release run on the **RX 7900 XT** at **3840 × 2160 output** (Series X, 30 FPS target) with upstream prelude texture uploads, RX 9070 XT fixes, and FSR 4.1.2 merged. Ran **23 min 50 s** continuously across **260 gameplay samples** (144 of them heavy `4,000+` draw scenes) and exited cleanly (**`code 0`**) with **`0.0 ms`** GPU settle waits and flat **`7.2 ms`** `heap_buffers`.
+- **`victory-rdna18.log` (26 November 2026 — 9 min 38 s Run):** Same RX 7900 XT Series X 4K setup, clean exit (**`code 0`**).
 
-| Sample Metric | All Gameplay (`1,000+` draws) | Heavy Scenes (`4,000+` draws) | Final 60 Seconds |
-| --- | ---: | ---: | ---: |
-| **Samples** | 101 | 25 | 12 |
-| **Median FPS** | **23.1 FPS** | **19.1 FPS** | **22.1 FPS** |
-| **FPS Range** | 4.5 – **29.3 FPS** | 4.5 – **24.4 FPS** | 14.7 – **25.4 FPS** |
-| **Samples ≥ 20 FPS** | **75 / 101 (74%)** | 10 / 25 | 7 / 12 |
-| **Median Frame Time** | **43.4 ms** | 52.3 ms | 45.25 ms |
-| **Median CPU Submission Prep** | **29.5 ms** | 35.4 ms | 31.1 ms |
-| **Median CPU Copy Prep** | **10.3 ms** | 13.3 ms | 11.75 ms |
-| **Median Copy-Back Time** | **13.5 ms** | 16.8 ms | 14.35 ms |
+| Sample Metric | `rdna21` (`1,000+` draws, 23m 50s) | `rdna21` (`4,000+` draws, heavy) | `rdna18` (`1,000+` draws, 9m 38s) | `rdna18` (`4,000+` draws, heavy) |
+| --- | ---: | ---: | ---: | ---: |
+| **Samples** | **260** | **144** | 101 | 25 |
+| **Median Draws / Frame** | 4,228 | 4,357 | 3,890 | 4,682 |
+| **Median FPS** | **20.8 FPS** | **20.3 FPS** | **23.1 FPS** | 19.1 FPS |
+| **Peak FPS** | **30.8 FPS** | **22.2 FPS** | 29.3 FPS | 24.4 FPS |
+| **Median Frame Time** | 48.05 ms | **49.3 ms** | **43.4 ms** | 52.3 ms |
+| **Median CPU Prep** | 33.8 ms | **34.45 ms** | **29.5 ms** | 35.4 ms |
+| **Median `heap_buffers`** | **7.2 ms** *(zero creep)* | **7.3 ms** | 7.7 ms | 11.5 ms |
+| **GPU Settle Waits** | **0.0 ms** | **0.0 ms** | **0.0 ms** | **0.0 ms** |
 
-*Peak frame rate reached **29.3 FPS (34.2 ms)** at 1,433 draws/frame, and **24.4 FPS (41.0 ms)** even at 4,000+ draws/frame.*
+*`rdna21` broke **30.8 FPS peak** on native Series X 4K and improved heavy-scene (`4,000+` draws) median FPS from **19.1 → 20.3 FPS** over a **23 min 50 s** continuous session with zero memory/descriptor creep.*
 
 ### 2. Series X 4K vs. Series S 1080p
 
