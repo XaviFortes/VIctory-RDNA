@@ -2358,6 +2358,9 @@ impl CardPlan {
 /// What a submission does for copies in the card's memory.
 struct CardPlan {
     ranges: Vec<CardRange>,
+    /// Dirty-range uploads and before-hashes, run ahead of the submission's
+    /// lists in the same `ExecuteCommandLists` call.
+    sync: Option<ID3D12CommandList>,
     /// The compare, run after the submission's lists.
     check: Option<ID3D12CommandList>,
     /// The copies whose card side was brought up to date, alive until the
@@ -4456,10 +4459,15 @@ impl Host {
     /// `relay`).
     /// `picked`: ranges that may be written too, and ranges to look at
     /// (`crate::picked`).
-    fn card_before(&self, declared: &[Declared], picked: &crate::picked::Ranges, flown: bool) -> Option<CardPlan> {
+    fn card_before(
+        &self,
+        declared: &[Declared],
+        picked: &crate::picked::Ranges,
+        flown: bool,
+    ) -> (Option<CardPlan>, Option<std::sync::MutexGuard<'static, u64>>) {
         use std::sync::Arc;
         if !crate::shadow::cards() {
-            return None;
+            return (None, None);
         }
         // The ranges this submission's shaders may write, per copy.
         let declared: Vec<Declared> = declared.iter().filter(|(shadow, _)| shadow.carded()).cloned().collect();
@@ -4481,10 +4489,12 @@ impl Host {
         let mut dirty = crate::shadow::card_dirty(sent_as);
         gathering.end();
         if declared.is_empty() && dirty.is_empty() && looked.is_empty() {
-            return None;
+            return (None, None);
         }
         let mut work = CARD_WORK.lock().unwrap_or_else(|e| e.into_inner());
-        let work = work.as_mut()?;
+        let Some(work) = work.as_mut() else {
+            return (None, None);
+        };
         // A copy whose shader writes are declared for the first time gets
         // its bytes from before, whole.
         let mut whole: Vec<Arc<crate::shadow::Shadow>> = Vec::new();
@@ -4507,6 +4517,7 @@ impl Host {
         let taking = crate::timeline::span("copies in the card's memory: taken");
         let own = if send::own() { send::take(self, &dirty) } else { None };
         taking.end();
+        let mut sync_list: Option<ID3D12CommandList> = None;
         if !dirty.is_empty() {
             let Some(sync) = work.sync.pop().or_else(|| self.make_prelude()) else {
                 fail(format_args!("no host list to bring host copies in the card's memory up to date"));
@@ -4517,7 +4528,7 @@ impl Host {
             // submission that was waited for, and came back after that);
             // live buffers, and the ranges lie in them.
             let recorded = unsafe {
-                (|| -> windows::core::Result<()> {
+                (|| -> windows::core::Result<ID3D12CommandList> {
                     allocator.Reset()?;
                     list.Reset(allocator, None)?;
                     if upcheck::on() {
@@ -4625,18 +4636,21 @@ impl Host {
                         }
                     }
                     list.Close()?;
-                    self.queue.ExecuteCommandLists(&[Some(list.cast()?)]);
-                    Ok(())
+                    list.cast()
                 })()
             };
-            if let Err(e) = recorded {
-                fail(format_args!("host copies in the card's memory could not be brought up to date ({e})"));
+            match recorded {
+                Ok(list) => sync_list = Some(list),
+                Err(e) => fail(format_args!("host copies in the card's memory could not be brought up to date ({e})")),
             }
             used.push((false, sync));
         }
-        drop(order);
+        // Only hold `QUEUE_ORDER` past `card_before` when `sync_list` still
+        // needs to be queued on `self.queue` in `Host::submit`.
+        let held_order = if sync_list.is_some() { order } else { None };
         let mut plan = CardPlan {
             ranges: Vec::new(),
+            sync: sync_list,
             check: None,
             _synced: dirty.into_iter().map(|(shadow, _)| shadow).collect(),
             lists: used,
@@ -4645,9 +4659,12 @@ impl Host {
             sends: own.map(send::Own::memory),
             up,
         };
-        // Each byte once, as the copy-back joins the declared ranges. The
-        // results go behind those of plans still in the air.
+        // Each byte once, as the copy-back joins the declared ranges. Coalesce
+        // overlapping or adjacent 64 KiB pieces of the same copy into one
+        // compare dispatch while keeping each `CardRange`'s exact byte span
+        // for `card_piece` clipping.
         let mut at = work.taken;
+        let mut dispatches: Vec<(Arc<crate::shadow::Shadow>, crate::shadow::CardSpan, u32, u32)> = Vec::new();
         for (shadow, ranges) in &declared {
             let mut sorted = ranges.clone();
             sorted.sort_unstable();
@@ -4659,22 +4676,64 @@ impl Host {
                 }
             }
             let twin = shadow.card_sides().is_some_and(|(_, before, _)| before.is_some());
+            let mode = if flown { 2 } else { 1 };
+            let mut cur_run: Option<(crate::shadow::CardSpan, u32)> = None;
             for (from, to) in spans {
                 let Some(span) = shadow.card_span(from, to) else {
                     continue;
                 };
-                let compared = twin && u64::from(at + span.pieces) * 4 <= work.differs.2;
+                if !twin {
+                    plan.ranges.push(CardRange {
+                        shadow: shadow.clone(),
+                        declared: (from, to),
+                        span,
+                        at,
+                        compared: false,
+                        picked: false,
+                    });
+                    continue;
+                }
+                if let Some((run_span, run_at)) = &mut cur_run
+                    && span.first <= run_span.first + run_span.pieces
+                {
+                    let new_end = (run_span.first + run_span.pieces).max(span.first + span.pieces);
+                    let extra = new_end - (run_span.first + run_span.pieces);
+                    if u64::from(at + extra) * 4 <= work.differs.2 {
+                        let range_at = *run_at + (span.first - run_span.first);
+                        run_span.pieces = new_end - run_span.first;
+                        run_span.to = run_span.to.max(span.to);
+                        at += extra;
+                        plan.ranges.push(CardRange {
+                            shadow: shadow.clone(),
+                            declared: (from, to),
+                            span,
+                            at: range_at,
+                            compared: true,
+                            picked: false,
+                        });
+                        continue;
+                    }
+                }
+                if let Some((run_span, run_at)) = cur_run.take() {
+                    dispatches.push((shadow.clone(), run_span, run_at, mode));
+                }
+                let compared = u64::from(at + span.pieces) * 4 <= work.differs.2;
+                let range_at = at;
                 plan.ranges.push(CardRange {
                     shadow: shadow.clone(),
                     declared: (from, to),
                     span,
-                    at,
+                    at: range_at,
                     compared,
                     picked: false,
                 });
                 if compared {
+                    cur_run = Some((span, range_at));
                     at += span.pieces;
                 }
+            }
+            if let Some((run_span, run_at)) = cur_run.take() {
+                dispatches.push((shadow.clone(), run_span, run_at, mode));
             }
         }
         for (shadow, from, len) in looked {
@@ -4691,11 +4750,12 @@ impl Host {
                     compared: true,
                     picked: true,
                 });
+                dispatches.push((shadow.clone(), span, at, 1));
                 at += span.pieces;
             }
         }
         work.taken = at;
-        if plan.ranges.iter().any(|r| r.compared) {
+        if !dispatches.is_empty() {
             let Some(check) = work.check.pop().or_else(|| self.make_prelude()) else {
                 fail(format_args!("no host list for the compare of host copies in the card's memory"));
             };
@@ -4720,15 +4780,20 @@ impl Host {
                     list.SetComputeRootSignature(&work.root);
                     list.SetPipelineState(&work.pso);
                     list.SetComputeRootUnorderedAccessView(3, work.differs.0.GetGPUVirtualAddress());
-                    for r in plan.ranges.iter().filter(|r| r.compared) {
-                        let (Some((_, Some(before), _)), size) = (r.shadow.card_sides(), r.shadow.card_hash_size()) else {
+                    let mut last_shadow: usize = 0;
+                    for (shadow, span, dispatch_at, mode) in &dispatches {
+                        let (Some((_, Some(before), _)), size) = (shadow.card_sides(), shadow.card_hash_size()) else {
                             continue;
                         };
-                        list.SetComputeRootShaderResourceView(1, r.shadow.buffer.GetGPUVirtualAddress());
-                        list.SetComputeRootUnorderedAccessView(2, before.GetGPUVirtualAddress());
+                        let key = Arc::as_ptr(shadow) as usize;
+                        if key != last_shadow {
+                            last_shadow = key;
+                            list.SetComputeRootShaderResourceView(1, shadow.buffer.GetGPUVirtualAddress());
+                            list.SetComputeRootUnorderedAccessView(2, before.GetGPUVirtualAddress());
+                        }
                         // (What is only looked at keeps its hashes: what
                         // changed there is the next declared range's to land.)
-                        card_pass(list, &r.span, size as u32, r.at, if flown && !r.picked { 2 } else { 1 });
+                        card_pass(list, span, size as u32, *dispatch_at, *mode);
                         CARD_PASSES[2].fetch_add(1, Ordering::Relaxed);
                     }
                     list.Close()?;
@@ -4742,7 +4807,7 @@ impl Host {
             plan.lists.push((true, check));
         }
         work.out += 1;
-        Some(plan)
+        (Some(plan), held_order)
     }
 
     /// With [`relay`]: whether the compare's result area is half taken by
@@ -5938,11 +6003,20 @@ impl Host {
             shadow.writing(*at, *len);
         }
         let declared = declared_writes(runs);
-        let card = self.card_before(&declared, &picked, flown);
+        let (card, mut card_order) = self.card_before(&declared, &picked, flown);
         // The sends are taken: from here on the references hold what the
         // copies in the lists put.
         for (shadow, at, bytes) in batch.placed.drain(..) {
             shadow.placed_copy(at, &bytes);
+        }
+        if let Some(sync) = card.as_ref().and_then(|c| c.sync.clone()) {
+            lists.insert(0, Some(sync));
+            #[cfg(feature = "diagnostics")]
+            {
+                marks.iter_mut().for_each(|m| m.0 += 1);
+                marks.insert(0, (0, crate::copystat::Timed::Other));
+            }
+            firsts.iter_mut().for_each(|first| *first += 1);
         }
         if let Some(check) = card.as_ref().and_then(|c| c.check.clone()) {
             #[cfg(feature = "diagnostics")]
@@ -5990,8 +6064,10 @@ impl Host {
                 let mut from = 0;
                 for to in cuts.into_iter().chain([lists.len()]) {
                     self.queue.ExecuteCommandLists(&lists[from..to]);
+                    drop(card_order.take());
                     from = to;
                 }
+                drop(card_order.take());
                 self.queue.Signal(&self.fence, *submitted)
             };
             awake::sent(&self.device);
@@ -6049,6 +6125,7 @@ impl Host {
             // SAFETY: closed lists; the fence and event are ours.
             unsafe {
                 self.queue.ExecuteCommandLists(group);
+                drop(card_order.take());
                 self.card_sent();
                 let waited = self
                     .queue
