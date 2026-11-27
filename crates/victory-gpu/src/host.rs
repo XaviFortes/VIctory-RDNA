@@ -3221,7 +3221,9 @@ fn stale_under_flights(runs: &[&HostList]) -> Vec<(std::sync::Arc<crate::shadow:
     let scanning = std::time::Instant::now();
     for list in runs {
         for step in &list.deferred().copies {
-            if let Step::Refresh(shadow, address, len) = step {
+            if let Step::Refresh(shadow, address, len) = step
+                && !shadow.in_place()
+            {
                 let place = places.entry(Arc::as_ptr(shadow) as usize).or_insert_with(|| {
                     shadow.writes_pending().then(|| {
                         spans.push((shadow.clone(), *address, *address + *len));
@@ -7816,12 +7818,14 @@ impl HostList {
                     (started, p.len)
                 }
                 Step::Refresh(shadow, address, len) => {
-                    #[cfg(feature = "diagnostics")]
-                    {
-                        refreshes += 1;
-                        refreshed += *len as u64;
+                    if !shadow.in_place() {
+                        #[cfg(feature = "diagnostics")]
+                        {
+                            refreshes += 1;
+                            refreshed += *len as u64;
+                        }
+                        batch.add(shadow, *address, *len);
                     }
-                    batch.add(shadow, *address, *len);
                     continue;
                 }
                 Step::Run(work) | Step::Host(work, _) => {
@@ -8244,6 +8248,9 @@ fn list_front(steps: &[Step], textures: bool) -> ListFront {
     let mut refreshed: ByCopy<()> = ByCopy::default();
     let touches = steps.iter().filter_map(|step| match step {
         Step::Refresh(shadow, from, len) => {
+            if shadow.in_place() {
+                return None;
+            }
             let key = std::sync::Arc::as_ptr(shadow) as usize;
             if refreshed.insert(key, ()).is_none() {
                 shadows.push((key, shadow.clone()));
@@ -8668,6 +8675,9 @@ impl Batch {
             for step in &list.deferred().copies {
                 match step {
                     Step::Refresh(shadow, at, len) => {
+                        if shadow.in_place() {
+                            continue;
+                        }
                         let key = std::sync::Arc::as_ptr(shadow) as usize;
                         if key != last {
                             copies.entry(key).or_insert_with(|| shadow.clone());
@@ -8772,6 +8782,9 @@ impl Batch {
             for (i, step) in list.deferred().copies.iter().enumerate() {
                 touches.push(match step {
                     Step::Refresh(shadow, at, len) => {
+                        if shadow.in_place() {
+                            continue;
+                        }
                         let key = std::sync::Arc::as_ptr(shadow) as usize;
                         copies.entry(key).or_insert_with(|| shadow.clone());
                         Touch::Refresh(key, *at, *at + *len)
