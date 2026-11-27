@@ -175,6 +175,11 @@ With `rdna18`, **Series X at 4K output (`22.1–23.1 FPS` median, `25.4 FPS` fin
 
 </details>
 
+### Community benchmarks
+
+- **RX 9070 XT · Series X · Windowed:** KingKaom reported **22.6 FPS median (44.2 ms/frame)** across 153 samples over about **13 minutes in-world**, including scripted walking. The run exited cleanly with no GPU device removal. Tested on `9cd7782` with a diagnostics build, the fast preset, and warmed shader translations. [Test setup and results](docs/benchmarks/community-rdna.md#rx-9070-xt-series-x)
+- **RX 7900 XTX · Series X · 4K output:** HAL9000RELOADED measured the cost of full indirect-draw ordering and tested an experimental batching patch on the upstream build. [Ordering benchmark](docs/benchmarks/community-rdna.md#rx-7900-xtx-port-1-ordering)
+
 ---
 
 ## 💻 PowerShell CLI (Windows)
