@@ -10,7 +10,7 @@
 //! dictionary that stands in for blocks -1 to -255) and the residuals of the
 //! endpoints and indices against them. The models, the index rank tables,
 //! the BC7 control codes and the dictionaries are constants of the format,
-//! kept in `bcpack-tables.bin` beside this file ([`Tables::builtin`]).
+//! supplied by the user at runtime.
 
 use std::fmt;
 
@@ -119,10 +119,6 @@ impl Reader<'_> {
 }
 
 impl Tables {
-    /// The tables VIctory ships with.
-    pub fn builtin() -> Result<Tables, Error> {
-        Tables::parse(include_bytes!("bcpack-tables.bin"))
-    }
 
     /// Reads the table file: 128 x 9 u16 model frequencies (per bucket, the
     /// frequency of each of its symbols), the rank tables (BC1 256 B, BC3
@@ -1163,11 +1159,6 @@ fn bc6<'a>(
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn the_shipped_tables_parse() {
-        assert!(super::Tables::builtin().is_ok());
-    }
-
     use super::*;
 
     /// Tables we made: uniform models, identity ranks, a BC7 code per mode,
@@ -1406,7 +1397,6 @@ mod tests {
             }
         }
         for t in [
-            Tables::builtin().unwrap(),
             Tables::parse(&tables()).unwrap(),
             Tables::parse(&narrow).unwrap(),
         ] {
@@ -1456,7 +1446,6 @@ mod tests {
     #[test]
     fn payload_step_matches_the_reference_decode() {
         for t in [
-            Tables::builtin().unwrap(),
             Tables::parse(&tables()).unwrap(),
         ] {
             for model in 0..MODELS as u8 {
@@ -1597,8 +1586,10 @@ mod tests {
     /// A dictionary entry stands in for a block the decoder made: a set with
     /// 0 index bits holds no indices, and pixel 0 is the anchor (top bit clear).
     #[test]
+    #[ignore = "requires authorized external BCPack tables"]
     fn bc7_dictionary_indices_line_up() {
-        let t = Tables::builtin().unwrap();
+        let path = std::env::var_os("VICTORY_BCPACK_TABLES").expect("VICTORY_BCPACK_TABLES");
+        let t = Tables::parse(&std::fs::read(path).unwrap()).unwrap();
         for (k, (_, ix)) in t.bc7.iter().enumerate() {
             let anchor = 0..1 << (ix.bits[0] - 1);
             let ok = (ix.bits[1] != 0 || ix.ix[1] == [0; 16]) && anchor.contains(&ix.ix[0][0]);

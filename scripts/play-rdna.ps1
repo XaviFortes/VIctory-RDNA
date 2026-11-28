@@ -1,9 +1,9 @@
 <#
 .SYNOPSIS
-    One-command launcher for VIctory-RDNA with tuned AMD RDNA3 defaults.
+    One-command launcher for Copperframe with tuned AMD RDNA3 defaults.
 
 .DESCRIPTION
-    Starts an Xbox Series title under VIctory-RDNA with the tuned
+    Starts an Xbox Series title under Copperframe with the tuned
     performance flags (including GPU-side 1 MiB+ buffer compares, zero-copy
     constants heap, patched descriptor tracking, and multi-threaded list
     translation).
@@ -97,7 +97,7 @@ $gameDir = Split-Path -Parent $Exe
 # 2. Ensure victory.exe is built (build automatically on first run or -Rebuild).
 $victory = Join-Path $repoRoot "target\$Build\victory.exe"
 if ($Rebuild -or -not (Test-Path -LiteralPath $victory -PathType Leaf)) {
-    Write-LaunchMessage "Building VIctory-RDNA ($Build profile)..." Cyan
+    Write-LaunchMessage "Building Copperframe ($Build profile)..." Cyan
     $cargo = Get-Command cargo.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $cargo) {
         Write-LaunchMessage "Cargo was not found. Install Rust with rustup, then reopen the launcher." Red
@@ -169,7 +169,7 @@ foreach ($k in $settings.Keys) {
 }
 
 $mode = if ($Safe) { 'SAFE' } else { 'RDNA3 FAST' }
-Write-LaunchMessage "Launching VIctory-RDNA [$mode | $Console | $Build]" Green
+Write-LaunchMessage "Launching Copperframe [$mode | $Console | $Build]" Green
 Write-LaunchMessage "  Binary : $victory"
 Write-LaunchMessage "  Game   : $Exe"
 if ($Fps -gt 0) { Write-LaunchMessage "  Target : $Fps FPS ($($settings['VICTORY_FRAME_INTERVAL_MS']) ms)" }
@@ -180,7 +180,7 @@ Push-Location -LiteralPath $gameDir
 try {
     Invoke-LaunchProgram $victory @('run', '--console', $Console, '--execute', $Exe)
     $runExitCode = $LASTEXITCODE
-    Write-LaunchMessage "VIctory-RDNA exited with code $runExitCode."
+    Write-LaunchMessage "Copperframe exited with code $runExitCode."
 } finally {
     Pop-Location
 }

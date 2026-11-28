@@ -1496,10 +1496,13 @@ fn bcpack_tables() -> Result<&'static Tables, HRESULT> {
     }
 }
 
-/// The tables VIctory ships with.
+/// The user supplies a table file from an authorized source.
 #[cfg(not(test))]
 fn load_bcpack_tables() -> Result<Tables, String> {
-    Tables::builtin().map_err(|e| format!("the built-in BCPack tables: {e}"))
+    let path = std::env::var_os("VICTORY_BCPACK_TABLES").ok_or("set VICTORY_BCPACK_TABLES to an authorized table file")?;
+    victory_core::ensure_outside_repo(std::path::Path::new(&path)).map_err(|e| e.to_string())?;
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    Tables::parse(&bytes).map_err(|e| e.to_string())
 }
 
 /// Tests decode streams made against tables of their own, from this folder.

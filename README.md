@@ -1,13 +1,13 @@
 <div align="center">
 
-# VIctory-RDNA
+# Copperframe
 
 **High-FPS Xbox Series X|S Direct3D 12 compatibility layer, engineered for AMD RDNA3.**
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Platform: Windows & Linux](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20(Wine)-0078D6.svg)](#quick-start)
 [![GPU: AMD RDNA3 / RDNA4](https://img.shields.io/badge/Tuned%20For-AMD%20RDNA3%20%2F%20RDNA4%20(D3D12)-ED1C24.svg)](#what-makes-victory-rdna-fast)
-[![Series X 4K: 23.1 FPS Median | 30.8 Peak](https://img.shields.io/badge/GTA%20VI%204K%20Series%20X-23.1%20FPS%20Median%20%7C%2030.8%20Peak-2EA44F.svg)](#benchmarks)
+[![Series X 4K: 23.1 FPS Median | 30.8 Peak](https://img.shields.io/badge/4K%20Series%20X-23.1%20FPS%20Median%20%7C%2030.8%20Peak-2EA44F.svg)](#benchmarks)
 
 *Standing on the shoulders of [VIctory](https://github.com/Marvisak/VIctory) and [VIctory-7900XTX](https://github.com/avatarmanz/VIctory-7900XTX) — pushed to nearly **2× baseline performance** with zero resolution hacks and a 1-click desktop launcher.*
 
@@ -36,7 +36,7 @@ Tested on **Windows 11 · AMD Radeon RX 7900 XT (20 GB, ReBAR) · Direct3D 12** 
 > **Optional AMD AFMF 2:** Because `VIctory-RDNA` delivers **22–25+ FPS native** with flat frame pacing and zero settle stalls on Series X 4K, enabling **AMD Fluid Motion Frames 2 (AFMF 2)** in Adrenalin brings perceived fluidity into the **45–50 FPS** range — while keeping full Series X visual fidelity. *(All benchmark numbers in this README are strictly **native rendered FPS** without frame generation.)*
 
 > [!NOTE]
-> `VIctory-RDNA` is an active, experimental compatibility layer. You must supply your own legally obtained game files — no copyrighted assets are included or linked here. Compatibility and performance vary by title, hardware, and build.
+> Copperframe is an independently maintained Xbox Series compatibility fork of VIctory and VIctory-7900XTX. Fork modifications through 2026-11-28 include RDNA performance tuning, a desktop launcher, and DualShock 4 input. Supply only game files you are authorized to use. Some workloads require external BCPack tables from an authorized source. See the [asset and distribution policy](docs/asset-policy.md).
 
 ---
 
@@ -112,6 +112,10 @@ WINEPREFIX="$HOME/.wine-victory" sh ./launch.sh
 | **Rebuild before play** | Off | Re-runs Cargo before launching on Windows. |
 | **Environment overrides** | Empty | Under **Advanced**, enter one `VICTORY_NAME=value` per line (e.g. `VICTORY_PANEL=1`). |
 
+On Windows, open **Controllers…** in the launcher to choose an input source and test buttons, sticks, and triggers. Automatic mode prefers a connected DualShock 4 over XInput. Cross maps to Xbox A, Circle to B, Square to X, and Triangle to Y by default. In **Bindings**, choose a physical button or use **Bind** and press it on the controller. Stick deadzone, inversion, and swapping are under **Controller**.
+
+**Save** applies the profile the next time a game starts, including when launched through PowerShell. The profile lives at `%LOCALAPPDATA%\VIctory-RDNA\controller.ini`. Set `VICTORY_CONTROLLER_CONFIG` to use a different path. Native DualShock 4 input covers buttons, sticks, and triggers. Rumble is available through XInput.
+
 Every session automatically saves a fresh timestamped log without overwriting older captures:
 - **Windows launcher data & logs:** `%LOCALAPPDATA%\VIctory-RDNA`
 - **Linux launcher data & logs:** `${XDG_DATA_HOME:-$HOME/.local/share}/victory-rdna`
@@ -125,7 +129,28 @@ Every session automatically saves a fresh timestamped log without overwriting ol
 
 All measurements below are from **periodic swap-chain logs on a single machine** (Windows 11, **AMD Radeon RX 7900 XT 20 GB**, Zen 3 24-thread CPU, 64 GB RAM, ReBAR enabled, Release build).
 
-### 1. Latest Series X 4K Runs (`rdna18` & `rdna21` · Default Preset)
+### Extended Series X 4K session (`rdna-t2`)
+
+The 28 November 2026 run used the **RX 7900 XT**, **3840 × 2160 windowed output**, the RDNA3 Fast preset, and **14 command translation workers**. It ran for **37 min 28 s** from startup to a clean window close. Across **410 gameplay samples** with at least 1,000 draws per frame, the median was **15.35 FPS (65.1 ms)** and the peak was **29.6 FPS** in a lighter scene. **50 samples reached 20 FPS or higher**. The 323 samples with at least 4,000 draws per frame had a **14.7 FPS median** and a **21.8 FPS peak**.
+
+| Median per gameplay sample | First 5 min (57 samples) | Final 5 min (54 samples) |
+| --- | ---: | ---: |
+| FPS | **19.8** | **13.5** |
+| Frame time | 50.5 ms | 74.3 ms |
+| Draws per frame | 4,438 | 5,656 |
+| Submission phases total | 34.1 ms | 51.1 ms |
+| Front refresh | 11.6 ms | 21.0 ms |
+| Write-watch (`ask_once`) | 8.1 ms | 8.5 ms |
+| Buffer copy traffic | 36.0 MB/frame | 60.8 MB/frame |
+| Heap-buffer pass | 11.3 ms | 23.8 ms |
+| GPU time with no VIctory work queued | 15.6 ms | 35.3 ms |
+| Of that idle time, while the submitting thread worked | 10.8 ms | 27.1 ms |
+
+Front refresh was the largest measured submission phase late in the run. The worst sample in the final five minutes fell to **5.2 FPS** with **77.2 ms** of front refresh and **122.5 ms** waiting at Present for the submission thread. These measurements overlap. The final gameplay sample recovered to **15.6 FPS** with 5,665 draws per frame.
+
+Within a narrower band of **5,500–6,499 draws per frame**, samples with zero pipelines pending still went from **16.6 FPS** in the first 20 minutes (32 samples) to **12.9 FPS** in the final five minutes (10 samples). The heap-buffer pass rose from **12.8 ms** to **30.6 ms** in that comparison. This was live gameplay across different scenes. The log captures submission and queue timing, with no late-session VRAM measurements or hardware GPU timestamps to determine the underlying cause of the extra work.
+
+### 1. Earlier Series X 4K Runs (`rdna18` & `rdna21` · Default Preset)
 
 - **`victory-rdna21.log` (27 November 2026 — Extended 23 min 50 s Run):** Windows D3D12 release run on the **RX 7900 XT** at **3840 × 2160 output** (Series X, 30 FPS target) with upstream prelude texture uploads, RX 9070 XT fixes, and FSR 4.1.2 merged. Ran **23 min 50 s** continuously across **260 gameplay samples** (144 of them heavy `4,000+` draw scenes) and exited cleanly (**`code 0`**) with **`0.0 ms`** GPU settle waits and flat **`7.2 ms`** `heap_buffers`.
 - **`victory-rdna18.log` (26 November 2026 — 9 min 38 s Run):** Same RX 7900 XT Series X 4K setup, clean exit (**`code 0`**).

@@ -1334,6 +1334,7 @@ pub(crate) struct HostList {
     /// What the list does with depth textures that have a colour twin, by
     /// twin ([`TwinUse`]).
     twins: Mutex<std::collections::HashMap<usize, TwinUse>>,
+    twins_writing: std::sync::atomic::AtomicBool,
     /// The list that runs those transitions just before this one, made
     /// when the list first has such transitions ([`lazy_prelude`]).
     prelude: OnceLock<Option<Prelude>>,
@@ -3892,7 +3893,6 @@ pub(crate) mod rec;
 mod send;
 mod upq;
 pub(crate) use send::{goes_as_words, words_under};
-#[cfg(feature = "diagnostics")]
 pub(crate) mod spans;
 mod torn;
 #[cfg(feature = "diagnostics")]
@@ -4311,6 +4311,7 @@ impl Host {
                 scratch: Mutex::default(),
                 states: Mutex::default(),
                 twins: Mutex::default(),
+                twins_writing: std::sync::atomic::AtomicBool::new(false),
                 prelude,
                 pipelines,
                 #[cfg(feature = "diagnostics")]
@@ -5832,23 +5833,27 @@ impl Host {
         // wait for the card and the copy-back have their own places on the
         // frame line (run 92 showed them twice, "preparing" 250 ms for 135).
         let mut settled = std::time::Duration::ZERO;
+        let once = crate::watch::once();
+        let front = refresh_front();
+        let steps = if front { runs.iter().map(|list| list.deferred().copies.len()).sum() } else { 0 };
+        let mut front_scan_ns = 0;
+        let fronts = if front && crate::watch::port_guard_plan() && runs.len() >= 2 && steps >= WIDE_PLAN_STEPS {
+            let fronts = scan_fronts(runs, once);
+            let scanned = std::time::Instant::now();
+            front_scan_ns = (scanned - phase_t).as_nanos() as u64;
+            phase_t = scanned;
+            Some(fronts)
+        } else {
+            None
+        };
+        let profile = submit_profile();
         // One write-watch asking for everything the submission refreshes
         // (`VICTORY_ASK_ONCE`): per copy, the span of its refreshed ranges.
-        if crate::watch::once() {
-            let mut spans: ByCopy<(usize, usize)> = ByCopy::default();
-            for list in runs {
-                for step in &list.deferred().copies {
-                    if let Step::Refresh(shadow, address, len) = step
-                        && shadow.asked_ahead()
-                    {
-                        let span = spans
-                            .entry(std::sync::Arc::as_ptr(shadow) as usize)
-                            .or_insert((*address, *address + *len));
-                        *span = (span.0.min(*address), span.1.max(*address + *len));
-                    }
-                }
+        if once {
+            let ranges = ask_ranges(runs, fronts.as_deref());
+            if profile {
+                SUBMIT_DETAILS[0].fetch_add(phase_t.elapsed().as_nanos() as u64, Ordering::Relaxed);
             }
-            let ranges: Vec<(usize, usize)> = spans.into_values().collect();
             #[cfg(feature = "diagnostics")]
             SPLIT[8].fetch_add(split.so_far(), Ordering::Relaxed);
             stage.next("submit: asking the write watch");
@@ -5892,13 +5897,16 @@ impl Host {
         // What flights in the air may write.
         let air = line().written.clone();
         stage.next("submit: refreshes ahead of writes");
-        if refresh_front() {
-            batch.refresh_front(runs, &parts);
+        if front {
+            if profile {
+                SUBMIT_DETAILS[1].fetch_add(front_scan_ns, Ordering::Relaxed);
+            }
+            batch.refresh_front(runs, &parts, steps, fronts);
         } else if ahead_of_writes() {
             batch.refresh_ahead(runs, |list, i| own.as_ref().is_some_and(|own| own.takes(list, i)));
         }
         {
-            SUBMIT_PHASES[3].fetch_add(phase_t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            SUBMIT_PHASES[3].fetch_add(front_scan_ns + phase_t.elapsed().as_nanos() as u64, Ordering::Relaxed);
         }
         stage.next("submit: the lists' steps");
         let (mut deferred_ns, mut prelude_ns) = (0u64, 0u64);
@@ -6024,7 +6032,6 @@ impl Host {
         let sending = crate::timeline::ticks();
         if late {
             *submitted += 1;
-            #[cfg(feature = "diagnostics")]
             if let Some([front, behind]) = self.span_lists() {
                 lists.insert(0, Some(front));
                 lists.push(Some(behind));
@@ -6660,7 +6667,11 @@ impl HostList {
         *self.coming.lock().unwrap_or_else(|e| e.into_inner()) = None;
         *self.deferred() = Deferred::default();
         self.states.lock().unwrap_or_else(|e| e.into_inner()).clear();
-        self.twins.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        {
+            let mut twins = self.twins.lock().unwrap_or_else(|e| e.into_inner());
+            twins.clear();
+            self.twins_writing.store(false, Ordering::Release);
+        }
         self.pipelines.lock().unwrap_or_else(|e| e.into_inner()).clear();
         #[cfg(feature = "diagnostics")]
         self.indirects.lock().unwrap_or_else(|e| e.into_inner()).clear();
@@ -6823,7 +6834,10 @@ impl HostList {
             // Shaders write the twin when the draw or dispatch runs: what
             // the same one reads of the depth texture is prepared before
             // (`twins_written`).
-            (true, true) => u.writing = true,
+            (true, true) => {
+                self.twins_writing.store(true, Ordering::Release);
+                u.writing = true;
+            }
             (true, false) => u.behind[1] = Some(true),
             (false, _) => {}
         }
@@ -6959,12 +6973,16 @@ impl HostList {
     /// The draw or dispatch just prepared is recorded: the twins it writes
     /// now hold what their depth textures lack.
     pub(crate) fn twins_written(&self) {
+        if !self.twins_writing.load(Ordering::Acquire) {
+            return;
+        }
         let mut twins = self.twins.lock().unwrap_or_else(|e| e.into_inner());
         for u in twins.values_mut().filter(|u| u.writing) {
             u.writing = false;
             u.behind[0] = Some(true);
             self.changed_something();
         }
+        self.twins_writing.store(false, Ordering::Release);
     }
 
     /// At submission: the list that moves each texture this list uses from
@@ -7962,6 +7980,17 @@ impl std::hash::Hasher for AddressHash {
 /// `[pre, ask_once, stale, refresh_front, run_deferred, prelude, flush, snapshots, card_before, heaps+waiting, send]`.
 static SUBMIT_PHASES: [std::sync::atomic::AtomicU64; 11] = [const { std::sync::atomic::AtomicU64::new(0) }; 11];
 
+// Write-watch range gathering, shared list scan, refresh planning and refresh work.
+static SUBMIT_DETAILS: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
+// Worker time for unchanged checks, buffer refreshes and texture refreshes,
+// then submitted buffer spans and spans skipped by the unchanged check.
+static FRONT_WORK: [std::sync::atomic::AtomicU64; 5] = [const { std::sync::atomic::AtomicU64::new(0) }; 5];
+
+pub(crate) fn submit_profile() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| crate::switch::on("VICTORY_SUBMIT_PROFILE"))
+}
+
 /// Top copied buffers (`>= 64 KiB` per refresh) for identifying `refresh_front` copy traffic:
 /// `(start, len, carded) -> (bytes, us, count)`.
 static TOP_COPIES: Mutex<Option<std::collections::HashMap<(u64, u64, bool), (u64, u64, u64)>>> = Mutex::new(None);
@@ -8243,28 +8272,40 @@ struct ListFront {
     /// shaders (`usize::MAX, 0`: none) and whether it writes it: what
     /// [`join_fronts`] takes.
     copies: Vec<(usize, usize, usize, bool)>,
-    /// A copy the list refreshes, by address.
-    shadows: Vec<(usize, std::sync::Arc<crate::shadow::Shadow>)>,
+    /// Each refreshed copy and its whole range, including refreshes after
+    /// writes. The write-watch journal needs those too.
+    refreshes: Vec<(std::sync::Arc<crate::shadow::Shadow>, (usize, usize))>,
     /// The textures to bring up to date, in order.
     textures: Vec<std::sync::Arc<crate::texture::Staging>>,
 }
 
 /// A list's steps as [`front_spans`] takes them, folded per copy
 /// ([`ListFront`]).
-fn list_front(steps: &[Step], textures: bool) -> ListFront {
-    let mut shadows: Vec<(usize, std::sync::Arc<crate::shadow::Shadow>)> = Vec::new();
+fn list_front(steps: &[Step], textures: bool, ask: bool) -> ListFront {
+    let mut refreshes: Vec<(std::sync::Arc<crate::shadow::Shadow>, (usize, usize))> = Vec::new();
     let mut staged: Vec<std::sync::Arc<crate::texture::Staging>> = Vec::new();
-    let mut refreshed: ByCopy<()> = ByCopy::default();
+    let mut refreshed: ByCopy<usize> = ByCopy::default();
+    let mut last = (0, 0);
     let touches = steps.iter().filter_map(|step| match step {
         Step::Refresh(shadow, from, len) => {
-            if shadow.in_place() {
+            let in_place = shadow.in_place();
+            if in_place && !ask {
                 return None;
             }
             let key = std::sync::Arc::as_ptr(shadow) as usize;
-            if refreshed.insert(key, ()).is_none() {
-                shadows.push((key, shadow.clone()));
+            let to = *from + *len;
+            if last.0 != key {
+                let index = *refreshed.entry(key).or_insert_with(|| {
+                    refreshes.push((shadow.clone(), (*from, to)));
+                    refreshes.len() - 1
+                });
+                last = (key, index);
             }
-            Some(Touch::Refresh(key, *from, *from + *len))
+            if ask {
+                let span = &mut refreshes[last.1].1;
+                *span = (span.0.min(*from), span.1.max(to));
+            }
+            (!in_place).then_some(Touch::Refresh(key, *from, to))
         }
         Step::GpuWrite(shadow, ..) => Some(Touch::Write(std::sync::Arc::as_ptr(shadow) as usize)),
         Step::Texture(upload) if textures => {
@@ -8274,7 +8315,57 @@ fn list_front(steps: &[Step], textures: bool) -> ListFront {
         _ => None,
     });
     let copies = fold_touches(touches);
-    ListFront { copies, shadows, textures: staged }
+    ListFront { copies, refreshes, textures: staged }
+}
+
+/// Scan each closed list once for both front refreshes and the write watch.
+fn scan_fronts(runs: &[&HostList], ask: bool) -> Vec<ListFront> {
+    #[derive(Clone, Copy)]
+    struct Lists(*const *const HostList, usize);
+    // SAFETY: the lists outlive the call, which waits for every job.
+    unsafe impl Send for Lists {}
+    unsafe impl Sync for Lists {}
+    let lists: Vec<*const HostList> = runs.iter().map(|&list| std::ptr::from_ref(list)).collect();
+    let at = Lists(lists.as_ptr(), lists.len());
+    let fronts: std::sync::Arc<Vec<Mutex<Option<ListFront>>>> =
+        std::sync::Arc::new((0..runs.len()).map(|_| Mutex::new(None)).collect());
+    let out = fronts.clone();
+    let textures = wide_textures();
+    crate::shadow::wide_each(runs.len(), move |n| {
+        let at = at;
+        debug_assert!(n < at.1);
+        // SAFETY: as above; a list's deferred steps are behind its lock.
+        let list = unsafe { &**at.0.add(n) };
+        let front = list_front(&list.deferred().copies, textures, ask);
+        *out[n].lock().unwrap_or_else(|e| e.into_inner()) = Some(front);
+    });
+    fronts.iter().map(|m| m.lock().unwrap_or_else(|e| e.into_inner()).take().unwrap_or_default()).collect()
+}
+
+fn ask_ranges(runs: &[&HostList], fronts: Option<&[ListFront]>) -> Vec<(usize, usize)> {
+    let mut spans: ByCopy<(usize, usize)> = ByCopy::default();
+    let mut add = |shadow: &std::sync::Arc<crate::shadow::Shadow>, from, to| {
+        if shadow.asked_ahead() {
+            let key = std::sync::Arc::as_ptr(shadow) as usize;
+            spans.entry(key).and_modify(|span| {
+                *span = (span.0.min(from), span.1.max(to));
+            }).or_insert((from, to));
+        }
+    };
+    if let Some(fronts) = fronts {
+        for (shadow, (from, to)) in fronts.iter().flat_map(|front| &front.refreshes) {
+            add(shadow, *from, *to);
+        }
+    } else {
+        for list in runs {
+            for step in &list.deferred().copies {
+                if let Step::Refresh(shadow, from, len) = step {
+                    add(shadow, *from, *from + *len);
+                }
+            }
+        }
+    }
+    spans.into_values().collect()
 }
 
 /// Touches of one list, per copy in the order of their first touch: the span
@@ -8345,8 +8436,8 @@ fn join_keys<'a>(lists: impl Iterator<Item = &'a [(usize, usize, usize, bool)]>,
 fn join_fronts(fronts: &[ListFront], parts: &[usize]) -> Vec<(std::sync::Arc<crate::shadow::Shadow>, usize, usize)> {
     let mut shadows: ByCopy<std::sync::Arc<crate::shadow::Shadow>> = ByCopy::default();
     for front in fronts {
-        for (key, shadow) in &front.shadows {
-            shadows.entry(*key).or_insert_with(|| shadow.clone());
+        for (shadow, _) in &front.refreshes {
+            shadows.entry(std::sync::Arc::as_ptr(shadow) as usize).or_insert_with(|| shadow.clone());
         }
     }
     join_keys(fronts.iter().map(|f| f.copies.as_slice()), parts)
@@ -8357,7 +8448,24 @@ fn join_fronts(fronts: &[ListFront], parts: &[usize]) -> Vec<(std::sync::Arc<cra
 
 #[cfg(test)]
 mod front_tests {
-    use super::{Touch, fold_touches, front_spans, join_keys};
+    use super::{Step, Touch, ask_ranges, fold_touches, front_spans, join_fronts, join_keys, list_front};
+
+    #[test]
+    fn shared_scan_preserves_the_refreshes_after_a_shader_write_for_the_watch() {
+        let first = 0x10000;
+        let shadow = crate::shadow::Shadow::unbacked(first as u64, std::ptr::null_mut(), 65536, false);
+        let steps = [
+            Step::Refresh(shadow.clone(), first + 128, 32),
+            Step::GpuWrite(shadow.clone(), first + 256, 32),
+            Step::Refresh(shadow.clone(), first + 64, 512),
+        ];
+        let fronts = [list_front(&steps, false, true)];
+        assert_eq!(ask_ranges(&[], Some(&fronts)), [(first + 64, first + 576)]);
+        let spans = join_fronts(&fronts, &[]);
+        assert_eq!(spans.len(), 1);
+        assert!(std::sync::Arc::ptr_eq(&spans[0].0, &shadow));
+        assert_eq!((spans[0].1, spans[0].2), (first + 128, first + 160));
+    }
 
     /// Random submissions of lists (refreshes and shaders' writes of a few
     /// copies, new parts now and then): each list folded on its own and the
@@ -8643,84 +8751,65 @@ impl Batch {
 
     /// Before the steps of `runs` ([`refresh_front`]), a new part of the
     /// submission beginning at each of `parts`.
-    fn refresh_front(&mut self, runs: &[&HostList], parts: &[usize]) {
+    fn refresh_front(&mut self, runs: &[&HostList], parts: &[usize], steps: usize, fronts: Option<Vec<ListFront>>) {
         let mut planning = crate::timeline::span("refreshes in front: the steps gathered");
+        let began = submit_profile().then(std::time::Instant::now);
         let mut due = Vec::new();
-        // Renderer port #6: each list's part made on the threads beside, and
-        // joined here in order (`list_front`, `join_fronts`): one submission
-        // a frame has most of the frame's steps, 3-6 ms of this alone (run
-        // guard-4).
-        let steps: usize = runs.iter().map(|list| list.deferred().copies.len()).sum();
-        if crate::watch::port_guard_plan() && runs.len() >= 2 && steps >= WIDE_PLAN_STEPS {
-            #[derive(Clone, Copy)]
-            struct Lists(*const *const HostList, usize);
-            // SAFETY: the lists outlive the call, which waits for every job.
-            unsafe impl Send for Lists {}
-            unsafe impl Sync for Lists {}
-            let lists: Vec<*const HostList> = runs.iter().map(|&list| std::ptr::from_ref(list)).collect();
-            let at = Lists(lists.as_ptr(), lists.len());
-            let fronts: std::sync::Arc<Vec<std::sync::Mutex<Option<ListFront>>>> =
-                std::sync::Arc::new((0..runs.len()).map(|_| std::sync::Mutex::new(None)).collect());
-            let out = fronts.clone();
-            let textures = wide_textures();
-            crate::shadow::wide_each(runs.len(), move |n| {
-                let at = at;
-                // SAFETY: as above; a list's deferred steps are behind its lock.
-                let list = unsafe { &**at.0.add(n) };
-                debug_assert!(n < at.1);
-                let front = list_front(&list.deferred().copies, textures);
-                *out[n].lock().unwrap_or_else(|e| e.into_inner()) = Some(front);
-            });
-            drop(lists);
+        let spans = if let Some(mut fronts) = fronts {
+            for front in &mut fronts {
+                for staging in front.textures.drain(..) {
+                    if self.texture_due(&staging) {
+                        due.push(staging);
+                    }
+                }
+            }
+            join_fronts(&fronts, parts)
+        } else {
+            let mut copies: ByCopy<std::sync::Arc<crate::shadow::Shadow>> = ByCopy::default();
+            let mut touches = Vec::with_capacity(steps);
+            for (n, list) in runs.iter().enumerate() {
+                if parts.contains(&n) {
+                    touches.push(Touch::Part);
+                }
+                let mut last = 0;
+                for step in &list.deferred().copies {
+                    match step {
+                        Step::Refresh(shadow, at, len) => {
+                            if shadow.in_place() {
+                                continue;
+                            }
+                            let key = std::sync::Arc::as_ptr(shadow) as usize;
+                            if key != last {
+                                copies.entry(key).or_insert_with(|| shadow.clone());
+                                last = key;
+                            }
+                            touches.push(Touch::Refresh(key, *at, *at + *len));
+                        }
+                        Step::GpuWrite(shadow, ..) => touches.push(Touch::Write(std::sync::Arc::as_ptr(shadow) as usize)),
+                        Step::Texture(upload) if wide_textures() => {
+                            if self.texture_due(&upload.staging) {
+                                due.push(upload.staging.clone());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
             planning.next("refreshes in front: the spans");
-            let fronts: Vec<ListFront> = fronts.iter().map(|m| m.lock().unwrap_or_else(|e| e.into_inner()).take().unwrap_or_default()).collect();
-            for front in &fronts {
-                for staging in &front.textures {
-                    if self.texture_due(staging) {
-                        due.push(staging.clone());
-                    }
-                }
-            }
-            let spans = join_fronts(&fronts, parts);
-            self.refresh_spans(spans, due, planning);
-            return;
-        }
-        let mut copies: ByCopy<std::sync::Arc<crate::shadow::Shadow>> = ByCopy::default();
-        let mut touches = Vec::with_capacity(steps);
-        for (n, list) in runs.iter().enumerate() {
-            if parts.contains(&n) {
-                touches.push(Touch::Part);
-            }
-            let mut last = 0;
-            for step in &list.deferred().copies {
-                match step {
-                    Step::Refresh(shadow, at, len) => {
-                        if shadow.in_place() {
-                            continue;
-                        }
-                        let key = std::sync::Arc::as_ptr(shadow) as usize;
-                        if key != last {
-                            copies.entry(key).or_insert_with(|| shadow.clone());
-                            last = key;
-                        }
-                        touches.push(Touch::Refresh(key, *at, *at + *len));
-                    }
-                    Step::GpuWrite(shadow, ..) => touches.push(Touch::Write(std::sync::Arc::as_ptr(shadow) as usize)),
-                    Step::Texture(upload) if wide_textures() => {
-                        if self.texture_due(&upload.staging) {
-                            due.push(upload.staging.clone());
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        planning.next("refreshes in front: the spans");
-        let spans: Vec<_> = front_spans(touches.into_iter())
-            .into_iter()
-            .filter_map(|(key, from, to)| Some((copies.remove(&key)?, from, to)))
-            .collect();
+            front_spans(touches.into_iter())
+                .into_iter()
+                .filter_map(|(key, from, to)| Some((copies.remove(&key)?, from, to)))
+                .collect()
+        };
+        let transfer = began.map(|began| {
+            let now = std::time::Instant::now();
+            SUBMIT_DETAILS[2].fetch_add((now - began).as_nanos() as u64, Ordering::Relaxed);
+            now
+        });
         self.refresh_spans(spans, due, planning);
+        if let Some(transfer) = transfer {
+            SUBMIT_DETAILS[3].fetch_add(transfer.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        }
     }
 
     /// The rest of [`Batch::refresh_front`]: `spans` brought up to date in
@@ -8733,6 +8822,9 @@ impl Batch {
     ) {
         planning.end();
         self.front = true;
+        if spans.is_empty() && due.is_empty() {
+            return;
+        }
         self.ahead.reserve(spans.len());
         for (shadow, from, to) in &spans {
             self.ahead.insert(std::sync::Arc::as_ptr(shadow) as usize, (*from, *to));
@@ -8766,28 +8858,65 @@ impl Batch {
         }
         #[cfg(feature = "diagnostics")]
         FLUSHES[3].fetch_add(spans.len() as u64, Ordering::Relaxed);
-        crate::shadow::wide_each(spans.len() + due.len(), move |i| {
-            // The textures first: they are the longer pieces.
-            let Some(i) = i.checked_sub(due.len()) else {
-                due[i].refresh();
+        let profile = submit_profile();
+        if profile {
+            FRONT_WORK[3].fetch_add(spans.len() as u64, Ordering::Relaxed);
+        }
+        // Start the largest buffers beside the texture jobs. Their nested
+        // copy jobs can then run before the other refresh workers go idle.
+        const LARGE: usize = 1 << 20;
+        let mut large = 0;
+        for i in 0..spans.len() {
+            if spans[i].2 - spans[i].1 >= LARGE {
+                spans.swap(large, i);
+                large += 1;
+            }
+        }
+        spans[..large].sort_unstable_by_key(|(_, from, to)| std::cmp::Reverse(to - from));
+        let jobs = spans.len() + due.len();
+        let refresh = move |i: usize| {
+            let began = profile.then(std::time::Instant::now);
+            if (large..large + due.len()).contains(&i) {
+                due[i - large].refresh();
+                if let Some(began) = began {
+                    FRONT_WORK[2].fetch_add(began.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                }
                 return;
-            };
-            let (shadow, from, to) = &spans[i];
-            if many && shadow.nothing_new(*from, *to - *from) {
+            }
+            let buffer = if i < large { i } else { i - due.len() };
+            let (shadow, from, to) = &spans[buffer];
+            let unchanged = many && shadow.nothing_new(*from, *to - *from);
+            let copy = began.map(|began| {
+                let now = std::time::Instant::now();
+                FRONT_WORK[0].fetch_add((now - began).as_nanos() as u64, Ordering::Relaxed);
+                now
+            });
+            if unchanged {
                 #[cfg(feature = "diagnostics")]
                 FLUSHES[2].fetch_add(1, Ordering::Relaxed);
+                if profile {
+                    FRONT_WORK[4].fetch_add(1, Ordering::Relaxed);
+                }
                 return;
             }
             Self::update(shadow, *from, *to);
-        });
+            if let Some(copy) = copy {
+                FRONT_WORK[1].fetch_add(copy.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            }
+        };
+        match jobs {
+            0 => {}
+            1 => refresh(0),
+            _ => crate::shadow::wide_each(jobs, refresh),
+        }
         if ahead {
             crate::watch::ask_ahead_done();
         }
         // The time counted is the time it took, not the threads' sum.
         let took = started.elapsed().as_micros() as u64;
-        let summed = [0, 2].map(|i| PREPARING[i].load(Ordering::Relaxed)).iter().zip(before).map(|(now, was)| now.saturating_sub(was)).collect::<Vec<_>>();
-        PREPARING[2].fetch_sub(summed[1], Ordering::Relaxed);
-        PREPARING[0].fetch_sub(summed[0], Ordering::Relaxed);
+        let [buffers, textures] = [0, 2].map(|i| PREPARING[i].load(Ordering::Relaxed));
+        PREPARING[2].fetch_sub(textures.saturating_sub(before[1]), Ordering::Relaxed);
+        PREPARING[0].fetch_sub(buffers.saturating_sub(before[0]), Ordering::Relaxed);
         PREPARING[0].fetch_add(took, Ordering::Relaxed);
         #[cfg(feature = "diagnostics")]
         SPLIT[6].fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
@@ -9446,12 +9575,19 @@ struct Meter {
     last_present: windows::core::HRESULT,
     since: std::time::Instant,
     frames: u32,
+    frame_times: Option<FrameTimes>,
     #[cfg(feature = "diagnostics")]
     copy_stats_frames: u64,
     drawn: u64,
     logged: std::time::Instant,
     /// The caption the window had, once read.
     caption: Option<Vec<u16>>,
+}
+
+#[derive(Default)]
+struct FrameTimes {
+    previous: Option<std::time::Instant>,
+    micros: Vec<u64>,
 }
 
 impl Meter {
@@ -9461,6 +9597,7 @@ impl Meter {
             last_present: windows::Win32::Foundation::S_OK,
             since: now,
             frames: 0,
+            frame_times: crate::switch::on("VICTORY_FRAME_TIMES").then(FrameTimes::default),
             #[cfg(feature = "diagnostics")]
             copy_stats_frames: 0,
             drawn: crate::draw::drawn(),
@@ -9499,7 +9636,13 @@ impl Meter {
         {
             self.copy_stats_frames += 1;
         }
-        let elapsed = self.since.elapsed();
+        let now = std::time::Instant::now();
+        if let Some(times) = &mut self.frame_times
+            && let Some(previous) = times.previous.replace(now)
+        {
+            times.micros.push((now - previous).as_micros() as u64);
+        }
+        let elapsed = now - self.since;
         if elapsed < std::time::Duration::from_secs(1) {
             return;
         }
@@ -9520,7 +9663,11 @@ impl Meter {
         }
         #[cfg(feature = "diagnostics")]
         let copy_stats_frames = if five { std::mem::take(&mut self.copy_stats_frames) as f64 } else { 0.0 };
+        let frame_times = self.frame_times.as_mut().map(|times| std::mem::take(&mut times.micros));
         meter_lines(move || {
+            if let Some(frame_times) = frame_times {
+                tracing::info!("present intervals (us), {:.0} draws/frame: {:?}", draws, frame_times);
+            }
             // Of a frame, ms preparing submissions and ms waiting for the GPU.
             let [cpu, gpu] = [0, 1].map(|i| {
                 SUBMISSION_US[i].swap(0, Ordering::Relaxed) as f64 / 1000.0 / frames
@@ -9545,10 +9692,10 @@ impl Meter {
             crate::descriptor::sync_line(frames);
             late_line(frames);
             crate::queue::behind_line(frames);
+            crate::draw::indirect_profile_line(frames);
             card_clock_line(frames, ms);
             upq::line(frames);
             rec::line(frames);
-            #[cfg(feature = "diagnostics")]
             spans::line(frames);
             crate::shadow::back_line(frames);
             #[cfg(feature = "diagnostics")]
@@ -9562,6 +9709,23 @@ impl Meter {
                         p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], tot
                     );
                 }
+            }
+            if submit_profile() {
+                let [ranges, scan, plan, apply] = [0, 1, 2, 3]
+                    .map(|i| SUBMIT_DETAILS[i].swap(0, Ordering::Relaxed) as f64 / 1e6 / frames);
+                let [watch_plan, query, publish] = crate::watch::ask_once_timings(frames);
+                tracing::info!(
+                    "submission details per frame: write watch ranges {ranges:.2} ms, plan {watch_plan:.2}, queries {query:.2}, journal {publish:.2} (includes stale re-asks); front shared scan {scan:.2}, plan {plan:.2}, refresh {apply:.2}"
+                );
+                crate::watch::ask_query_line(frames);
+                let [checks, buffers, textures, spans, skipped] =
+                    FRONT_WORK.each_ref().map(|n| n.swap(0, Ordering::Relaxed) as f64 / frames);
+                tracing::info!(
+                    "front refresh details per frame (summed worker elapsed): unchanged checks {:.2} ms, buffers {:.2}, textures {:.2}; {skipped:.0} of {spans:.0} buffer spans skipped",
+                    checks / 1e6,
+                    buffers / 1e6,
+                    textures / 1e6,
+                );
             }
             if let Some(map) = TOP_COPIES.lock().unwrap_or_else(|e| e.into_inner()).take()
                 && !map.is_empty()

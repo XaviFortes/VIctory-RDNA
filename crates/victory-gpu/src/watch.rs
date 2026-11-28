@@ -29,6 +29,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::{Bound, RangeBounds};
 use std::sync::{Condvar, Mutex, RwLock};
+use std::sync::atomic::Ordering;
 
 /// The unit tracked and copied: 64 KiB, the console's page (the kernel's
 /// 4 KiB pages fold into it). Finer units made the checks of the world's
@@ -293,6 +294,9 @@ impl Held<'_> {
 /// the asking it took the page at): the parts to take again, a bit for each
 /// 4 KiB, in the same order.
 pub(crate) fn parts_written(pages: &[(usize, u64)]) -> Vec<u16> {
+    if pages.is_empty() {
+        return Vec::new();
+    }
     let j = journal();
     pages.iter().map(|&(page, taken)| j.notes.parts_since(page, taken)).collect()
 }
@@ -687,6 +691,12 @@ fn spread_each<T: Send>(n: usize, each: impl Fn(usize) -> T + Sync) -> Vec<T> {
 /// last asked, in order, each once, with their written parts; `None` if the range is not write-watched
 /// memory of one reservation. The caller holds the range ([`Asking`]).
 fn kernel_written(first: usize, last: usize) -> Option<Vec<(usize, u16)>> {
+    let mut pages = Vec::new();
+    kernel_written_into(first, last, &mut pages).then_some(pages)
+}
+
+/// Append one query's answer directly to a batch without a temporary vector.
+fn kernel_written_into(first: usize, last: usize, pages: &mut Vec<(usize, u16)>) -> bool {
     use windows_sys::Win32::System::Memory::GetWriteWatch;
     const WRITE_WATCH_FLAG_RESET: u32 = 1;
     FOUND.with(|found| {
@@ -718,7 +728,7 @@ fn kernel_written(first: usize, last: usize) -> Option<Vec<(usize, u16)>> {
         if failed {
             // (On the timeline: how many askings the kernel refuses.)
             crate::timeline::span("asking refused").end();
-            return None;
+            return false;
         }
         if keep {
             reset_found(&found[..count]);
@@ -733,16 +743,22 @@ fn kernel_written(first: usize, last: usize) -> Option<Vec<(usize, u16)>> {
             tally(0, 1);
             tally(1, ((last - first) * (PAGE >> 10)) as u64);
         }
-        let mut pages: Vec<(usize, u16)> = Vec::new();
-        for &at in &found[..count] {
-            let (page, part) = (at / PAGE, 1u16 << (at % PAGE / KERNEL_PAGE));
-            match pages.last_mut() {
-                Some((last, parts)) if *last == page => *parts |= part,
-                _ => pages.push((page, part)),
-            }
-        }
-        Some(pages)
+        append_kernel_pages(pages, &found[..count]);
+        true
     })
+}
+
+fn append_kernel_pages(pages: &mut Vec<(usize, u16)>, found: &[usize]) {
+    // Keep the boundary between queries: the next query may overlap this one.
+    let mut current = None::<(usize, u16)>;
+    for &at in found {
+        let (page, part) = (at / PAGE, 1u16 << (at % PAGE / KERNEL_PAGE));
+        match &mut current {
+            Some((last, parts)) if *last == page => *parts |= part,
+            _ => pages.extend(current.replace((page, part))),
+        }
+    }
+    pages.extend(current);
 }
 
 /// Ranges of one submission closer than this are asked about together:
@@ -1038,6 +1054,30 @@ pub(crate) fn once() -> bool {
     *ON.get_or_init(|| std::env::var_os("VICTORY_ASK_ONCE").is_none_or(|v| v != "0"))
 }
 
+// Time to prepare the queries, run them, and publish the results.
+static ASK_ONCE_NS: [std::sync::atomic::AtomicU64; 3] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 3];
+// Time to take the asking lock, groups, kernel calls, refused calls, bytes queried.
+static ASK_QUERIES: [std::sync::atomic::AtomicU64; 5] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 5];
+
+pub(crate) fn ask_query_line(frames: f64) {
+    let [hold_ns, groups, calls, refused, bytes] =
+        ASK_QUERIES.each_ref().map(|counter| counter.swap(0, Ordering::Relaxed) as f64 / frames);
+    if calls != 0.0 {
+        tracing::info!(
+            target: "victory_gpu::host",
+            "write-watch query details per frame: lock acquisition {:.2} ms, {groups:.1} groups, {calls:.1} calls, {refused:.1} refused, {:.1} MiB queried",
+            hold_ns / 1e6,
+            bytes / 1048576.0,
+        );
+    }
+}
+
+pub(crate) fn ask_once_timings(frames: f64) -> [f64; 3] {
+    [0, 1, 2].map(|i| ASK_ONCE_NS[i].swap(0, Ordering::Relaxed) as f64 / 1e6 / frames)
+}
+
 /// With [`once`]: asks about `ranges` (everything a submission's lists
 /// refresh) as [`ask_ahead`] does, and lets that asking stand until
 /// [`ask_once_end`].
@@ -1046,6 +1086,15 @@ pub(crate) fn ask_once(ranges: &[(usize, usize)]) {
         return;
     }
     let mut spent = crate::timeline::span("asking: once");
+    let profile = crate::host::submit_profile();
+    let mut phase = profile.then(std::time::Instant::now);
+    let mut mark = |i: usize| {
+        if let Some(started) = phase {
+            let now = std::time::Instant::now();
+            ASK_ONCE_NS[i].fetch_add((now - started).as_nanos() as u64, Ordering::Relaxed);
+            phase = Some(now);
+        }
+    };
     ask_once_end();
     // Filter, sort, and drop contained ranges in O(N log N) before taking the
     // asking hold, then ask both grouped and solo runs in a single parallel
@@ -1056,6 +1105,7 @@ pub(crate) fn ask_once(ranges: &[(usize, usize)]) {
         .map(|&(start, end)| (start / PAGE, end.div_ceil(PAGE)))
         .collect();
     if pieces.is_empty() {
+        mark(0);
         spent.end();
         return;
     }
@@ -1085,16 +1135,42 @@ pub(crate) fn ask_once(ranges: &[(usize, usize)]) {
         runs.push(i..k);
         i = k;
     }
+    mark(0);
+    let before_hold = profile.then(std::time::Instant::now);
     let _all = Asking::hold_all();
-    let (mut asked, mut written) = (Vec::new(), Vec::new());
-    for (a, w) in spread_each(runs.len(), |r| {
-        let (mut a, mut w) = (Vec::new(), Vec::new());
-        ask_run_all(&pieces[runs[r].clone()], &mut a, &mut w);
-        (a, w)
-    }) {
-        asked.extend(a);
-        written.extend(w);
+    if let Some(before_hold) = before_hold {
+        ASK_QUERIES[0].fetch_add(before_hold.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        ASK_QUERIES[1].fetch_add(runs.len() as u64, Ordering::Relaxed);
     }
+    let ask = |run: std::ops::Range<usize>, asked: &mut Vec<_>, written: &mut Vec<_>| {
+        let mut stats = profile.then_some([0; 3]);
+        ask_run_all(&pieces[run], asked, written, &mut stats);
+        if let Some(stats) = stats {
+            for (counter, value) in ASK_QUERIES[2..].iter().zip(stats) {
+                counter.fetch_add(value, Ordering::Relaxed);
+            }
+        }
+    };
+    let (asked, written) = if runs.len() > 1 && spread() {
+        let mut results = spread_each(runs.len(), |r| {
+            let (mut asked, mut written) = (Vec::new(), Vec::new());
+            ask(runs[r].clone(), &mut asked, &mut written);
+            (asked, written)
+        }).into_iter();
+        let (mut asked, mut written) = results.next().unwrap_or_default();
+        for (a, w) in results {
+            asked.extend(a);
+            written.extend(w);
+        }
+        (asked, written)
+    } else {
+        let (mut asked, mut written) = (Vec::new(), Vec::new());
+        for run in runs {
+            ask(run, &mut asked, &mut written);
+        }
+        (asked, written)
+    };
+    mark(1);
     spent.next("asking: note");
     note_hot(&written);
     if port_journal() {
@@ -1103,6 +1179,7 @@ pub(crate) fn ask_once(ranges: &[(usize, usize)]) {
         j.ahead_asked = now;
         j.kept = !asked.is_empty();
         j.ahead.set(asked);
+        mark(2);
         spent.end();
         return;
     }
@@ -1114,38 +1191,45 @@ pub(crate) fn ask_once(ranges: &[(usize, usize)]) {
     }
     j.kept = !asked.is_empty();
     j.ahead.set(asked);
+    mark(2);
     spent.end();
 }
 
 /// Like [`ask_run`], but also asks leaf ranges of length 1 directly so
 /// [`ask_once`] completes in a single pass with no `ask_rest` follow-up.
-fn ask_run_all(pieces: &[(usize, usize)], asked: &mut Vec<(usize, usize)>, written: &mut Vec<(usize, u16)>) {
+fn ask_run_all(
+    pieces: &[(usize, usize)],
+    asked: &mut Vec<(usize, usize)>,
+    written: &mut Vec<(usize, u16)>,
+    stats: &mut Option<[u64; 3]>,
+) {
     if pieces.is_empty() {
         return;
     }
-    if pieces.len() == 1 {
-        let (first, last) = pieces[0];
-        #[cfg(feature = "diagnostics")]
-        let asking = std::time::Instant::now();
-        let found = kernel_written(first, last);
-        #[cfg(feature = "diagnostics")]
-        alone(first * PAGE, last * PAGE, found.as_ref().map_or(0, Vec::len), asking.elapsed());
-        if let Some(pages) = found {
-            written.extend(pages);
-            asked.push((first, last));
-        }
-        return;
-    }
     let first = pieces[0].0;
-    let last = pieces.iter().map(|p| p.1).max().unwrap_or(first);
-    if let Some(pages) = kernel_written(first, last) {
-        written.extend(pages);
+    // `ask_once` removed contained pieces, so their ends are increasing.
+    let last = pieces[pieces.len() - 1].1;
+    #[cfg(feature = "diagnostics")]
+    let (asking, before) = (std::time::Instant::now(), written.len());
+    let found = kernel_written_into(first, last, written);
+    #[cfg(feature = "diagnostics")]
+    if pieces.len() == 1 {
+        alone(first * PAGE, last * PAGE, written.len() - before, asking.elapsed());
+    }
+    if let Some([calls, refused, bytes]) = stats {
+        *calls += 1;
+        *refused += u64::from(!found);
+        *bytes += ((last - first) * PAGE) as u64;
+    }
+    if found {
         asked.push((first, last));
         return;
     }
-    let (a, b) = pieces.split_at(pieces.len() / 2);
-    ask_run_all(a, asked, written);
-    ask_run_all(b, asked, written);
+    if pieces.len() > 1 {
+        let (a, b) = pieces.split_at(pieces.len() / 2);
+        ask_run_all(a, asked, written, stats);
+        ask_run_all(b, asked, written, stats);
+    }
 }
 
 /// [`ask_once`] after its [`ask_ahead`]: what that left to `writes`, and the
@@ -4058,6 +4142,15 @@ fn writable(at: usize) -> bool {
 #[cfg(test)]
 mod parts_tests {
     use super::*;
+
+    #[test]
+    fn kernel_answers_fold_the_parts_of_each_query() {
+        let mut pages = Vec::new();
+        append_kernel_pages(&mut pages, &[PAGE, PAGE + KERNEL_PAGE, 2 * PAGE]);
+        append_kernel_pages(&mut pages, &[]);
+        append_kernel_pages(&mut pages, &[2 * PAGE + 3 * KERNEL_PAGE, 3 * PAGE]);
+        assert_eq!(pages, [(1, 0b11), (2, 1), (2, 0b1000), (3, 1)]);
+    }
 
     #[test]
     fn ranges_asked_ahead_hold_what_lies_in_one_of_them() {

@@ -165,6 +165,13 @@ enum Command {
     Replay(replay::Replay),
     /// Show the resolved configuration and check it.
     Config,
+    /// List physical gamepads and their raw input values.
+    #[cfg(windows)]
+    Controllers {
+        /// Stream live controller snapshots.
+        #[arg(long)]
+        watch: bool,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -243,6 +250,10 @@ fn main() -> Result<()> {
         #[cfg(all(windows, feature = "diagnostics"))]
         Command::Replay(options) => replay::run(options),
         Command::Config => show_config(),
+        #[cfg(windows)]
+        Command::Controllers { watch } => victory_hle::modules::gameinput::controller_status(watch)
+            .or_else(|error| if error.kind() == std::io::ErrorKind::BrokenPipe { Ok(()) } else { Err(error) })
+            .map_err(Into::into),
     }
 }
 

@@ -1,5 +1,5 @@
 //! `gameinput.dll`: input devices from the host. Gamepads come from XInput
-//! (host slots 0-3); while none is connected, the keyboard drives one
+//! or DualShock 4 Raw Input; while none is connected, the keyboard drives one
 //! stand-in gamepad (`FALLBACK_BUTTONS`). The keyboard is a device of its own
 //! too. A poll thread turns host state into readings (a new one per change)
 //! and runs device callbacks on connect and disconnect.
@@ -20,6 +20,12 @@ use std::time::{Duration, Instant};
 use super::xasync::{E_INVALIDARG, E_NOTIMPL};
 use super::xgameruntime::{HRESULT, S_OK};
 use crate::{HleExport, HleModule};
+
+#[cfg(windows)]
+mod controllers;
+
+#[cfg(windows)]
+pub use controllers::controller_status;
 
 /// The documented errors.
 pub const DEVICE_DISCONNECTED: HRESULT = 0x838A_0001_u32 as i32;
@@ -109,6 +115,9 @@ const _: () = assert!(size_of::<KeyState>() == 12 && size_of::<PadState>() == 28
 trait Source: Send {
     /// The pad in host slot `slot`, `None` when the slot is empty.
     fn pad(&mut self, slot: usize) -> Option<PadState>;
+    fn pads(&mut self) -> [Option<PadState>; PADS] {
+        std::array::from_fn(|slot| self.pad(slot))
+    }
     /// Keys held down; none while the title's window lacks focus.
     fn keys(&mut self) -> Vec<KeyState>;
     /// Motor speeds: low frequency (left), high frequency (right).
@@ -432,7 +441,7 @@ impl Hub {
     fn poll(&self) {
         let (pads, keys) = {
             let mut source = lock(&self.source);
-            let pads: [_; PADS] = std::array::from_fn(|slot| source.pad(slot));
+            let pads = source.pads();
             (pads, source.keys())
         };
         let events = self.state().poll(&self.devices, self.one_pad, pads, keys);
@@ -965,8 +974,8 @@ extern "system" fn set_rumble(this: *const Device, params: *const [f32; 4]) {
     let mut source = lock(&device.hub().source);
     if one_pad {
         // The one pad is every host pad.
-        for slot in 0..PADS {
-            if source.pad(slot).is_some() {
+        for (slot, pad) in source.pads().into_iter().enumerate() {
+            if pad.is_some() {
                 source.rumble(slot, speed(low), speed(high));
             }
         }
@@ -1114,7 +1123,7 @@ pub(crate) fn module() -> HleModule {
     }
 }
 
-/// Host input: XInput pads, the keyboard while our process has focus.
+/// Host input: gamepads and the keyboard while our process has focus.
 #[cfg(windows)]
 mod host {
     use std::time::{Duration, Instant};
@@ -1177,9 +1186,33 @@ mod host {
     #[derive(Default)]
     pub(super) struct Host {
         empty_until: [Option<Instant>; PADS],
+        profile: controllers::Profile,
+        xinput_active: bool,
     }
 
     impl Source for Host {
+        fn pads(&mut self) -> [Option<PadState>; PADS] {
+            use controllers::Input;
+            self.xinput_active = false;
+            let pads = match self.profile.source {
+                Input::Keyboard => [None; PADS],
+                Input::XInput => {
+                    self.xinput_active = true;
+                    std::array::from_fn(|slot| self.pad(slot))
+                }
+                Input::DualShock | Input::Auto => {
+                    let sony = controllers::dualshock_pads();
+                    if sony.iter().any(Option::is_some) || self.profile.source == Input::DualShock {
+                        sony
+                    } else {
+                        self.xinput_active = true;
+                        std::array::from_fn(|slot| self.pad(slot))
+                    }
+                }
+            };
+            pads.map(|pad| pad.map(|pad| self.profile.apply(pad)))
+        }
+
         fn pad(&mut self, slot: usize) -> Option<PadState> {
             if self.empty_until[slot].is_some_and(|until| Instant::now() < until) {
                 return None;
@@ -1236,6 +1269,9 @@ mod host {
         }
 
         fn rumble(&mut self, slot: usize, low: u16, high: u16) {
+            if !self.xinput_active {
+                return;
+            }
             let speeds = XINPUT_VIBRATION {
                 wLeftMotorSpeed: low,
                 wRightMotorSpeed: high,
@@ -1243,6 +1279,16 @@ mod host {
             // SAFETY: a valid vibration; an empty slot just fails.
             unsafe { XInputSetState(slot as u32, &speeds) };
         }
+    }
+
+    pub(super) fn xinput_pads() -> [Option<PadState>; PADS] {
+        // The tester should show the raw pad, independent of the saved mapping.
+        std::array::from_fn(|slot| {
+            let mut state = XINPUT_STATE::default();
+            // SAFETY: room for the state.
+            (unsafe { XInputGetState(slot as u32, &mut state) } == 0)
+                .then(|| convert(&state.Gamepad))
+        })
     }
 
     /// Debugging aid: `VICTORY_KEYS=<seconds>:<key>,...` holds each key for

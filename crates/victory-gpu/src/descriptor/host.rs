@@ -2955,33 +2955,39 @@ impl HostHeap {
                 views.made.clear();
             }
             let twins = self.twins.get(index as usize).is_some();
-            if !views.made.contains_key(&words) {
-                let view = super::view_at(words[1], words[2])?;
-                let at = 2 * views.made.len() as u32;
-                // (A constant buffer's bytes are copied for each draw.)
-                if at >= ListViews::SLOTS || matches!(view, View::Constant(..)) {
-                    return None;
+            use std::collections::hash_map::Entry;
+            let at = 2 * views.made.len() as u32;
+            let slots = (at < ListViews::SLOTS).then(|| [views.slot(at), views.slot(at + 1)]);
+            let made = match views.made.entry(words) {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => {
+                    let [slot, raw] = slots?;
+                    let view = super::view_at(words[1], words[2])?;
+                    // (A constant buffer's bytes are copied for each draw.)
+                    if matches!(view, View::Constant(..)) {
+                        return None;
+                    }
+                    let twin = twinned(&view);
+                    let kept = make_twinned(&view, slot, Some(raw))?;
+                    let listed = Listed {
+                        kind: crate::draw::view_kind(&view),
+                        texture: is_texture_view(&view),
+                        ready: (0, 0, false),
+                        tabled: None,
+                    };
+                    entry.insert(ListView { view, at, twin, kept, listed })
                 }
-                let twin = twinned(&view);
-                let kept = make_twinned(&view, views.slot(at), Some(views.slot(at + 1)))?;
-                let listed = Listed {
-                    kind: crate::draw::view_kind(&view),
-                    texture: is_texture_view(&view),
-                    ready: (0, 0, false),
-                    tabled: None,
-                };
-                views.made.insert(words, ListView { view, at, twin, kept, listed });
-            }
-            let made = &views.made[&words];
-            self.copy_from(index, views.slot(made.at));
-            if made.twin && twins {
-                self.copy_from(self.raw + index, views.slot(made.at + 1));
+            };
+            let (at, twin, kept, listed) = (made.at, made.twin, made.kept.clone(), made.listed);
+            self.copy_from(index, views.slot(at));
+            if twin && twins {
+                self.copy_from(self.raw + index, views.slot(at + 1));
                 self.twins[index as usize].store(true, std::sync::atomic::Ordering::Relaxed);
             } else {
                 self.clear_twin(index);
             }
-            self.keep(index, made.kept.clone());
-            Some(made.listed)
+            self.keep(index, kept);
+            Some(listed)
         })
     }
 

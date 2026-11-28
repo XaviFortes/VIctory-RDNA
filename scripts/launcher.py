@@ -73,15 +73,19 @@ def library_lock(folder: Path):
 
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as error:
-            raise RuntimeError("Another VIctory-RDNA launcher is using this game library.") from error
+            raise RuntimeError("Another Copperframe launcher is using this game library.") from error
         yield
 
 
 def save_library(path: Path, games: list[Path]) -> None:
+    atomic_write(path, json.dumps([str(game) for game in games], ensure_ascii=False, indent=2))
+
+
+def atomic_write(path: Path, content: str) -> None:
     with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as file:
         temporary = Path(file.name)
         try:
-            json.dump([str(game) for game in games], file, ensure_ascii=False, indent=2)
+            file.write(content)
             file.close()
             temporary.replace(path)
         finally:
@@ -102,7 +106,7 @@ def load_library(path: Path) -> list[Path]:
 
 
 def game_name(game: Path) -> str:
-    return "Grand Theft Auto VI" if game.name.lower() == TITLE_EXE else game.stem
+    return game.stem
 
 
 def log_path(folder: Path, game: Path, requested: str) -> Path:
@@ -196,7 +200,7 @@ def run_linux(session: Launch) -> int:
     with session.log.open("wb") as log:
         mode = "SAFE" if session.safe else "RDNA3 FAST"
         header = (
-            f"Launching VIctory-RDNA through Wine [{mode} | {session.console} | {session.build}]\n"
+            f"Launching Copperframe through Wine [{mode} | {session.console} | {session.build}]\n"
             f"  Binary : {runtime}\n  Game   : {session.game}\n  Log    : {session.log}\n"
         )
         log.write(header.encode("utf-8"))
@@ -222,7 +226,7 @@ def run_linux(session: Launch) -> int:
             cwd=session.game.parent, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
             check=False,
         ).returncode
-        log.write(f"VIctory-RDNA exited with code {code}.\n".encode())
+        log.write(f"Copperframe exited with code {code}.\n".encode())
         return code
 
 
@@ -268,10 +272,214 @@ def entry(parent, variable, width=25):
     )
 
 
+PAD_SOURCES = {
+    "Automatic (DualShock 4 first)": "auto",
+    "DualShock 4": "dualshock",
+    "XInput (Xbox)": "xinput",
+    "Keyboard only": "keyboard",
+}
+PAD_TARGETS = ("Menu", "View", "A", "B", "X", "Y", "D-pad Up", "D-pad Down",
+               "D-pad Left", "D-pad Right", "LB", "RB", "Left stick click", "Right stick click")
+PAD_BUTTONS = ("Options / Menu", "Share / View", "Cross / A", "Circle / B", "Square / X",
+               "Triangle / Y", *PAD_TARGETS[6:10], "L1 / LB", "R1 / RB",
+               "L3 / Left stick", "R3 / Right stick", "Unbound")
+
+
+class ControllerSettings:
+    def __init__(self, parent, profile: Path, build: str):
+        self.profile = profile
+        self.window = tk.Toplevel(parent, bg=PANEL, padx=16, pady=14)
+        self.window.title("Controllers · Copperframe")
+        self.window.transient(parent)
+        self.window.protocol("WM_DELETE_WINDOW", self.close)
+        self.source = tk.StringVar(self.window)
+        self.deadzone = tk.DoubleVar(self.window)
+        self.flags = {name: tk.BooleanVar(self.window) for name in
+                      ("swap_sticks", "invert_left_y", "invert_right_y")}
+        self.bindings = [tk.StringVar(self.window) for _ in PAD_TARGETS]
+        self.message = tk.StringVar(self.window)
+        self.devices = tk.StringVar(self.window, value="Checking connected controllers…")
+        self.pressed = tk.StringVar(self.window, value="Buttons  —")
+        self.samples = queue.Queue(maxsize=1)
+        self.process = None
+        self.capture = None
+        self.last_pad = None
+        self.timer = None
+        self.defaults()
+        try:
+            options = dict(line.split("=", 1) for line in profile.read_text(encoding="utf-8").splitlines() if "=" in line)
+            self.source.set(next(name for name, code in PAD_SOURCES.items()
+                                 if code == options.get("source", "auto")))
+            values = [int(value) for value in options.get("buttons", "").split(",") if value]
+            if len(values) == len(self.bindings) and all(0 <= value < len(PAD_BUTTONS) for value in values):
+                for binding, value in zip(self.bindings, values):
+                    binding.set(PAD_BUTTONS[value])
+            deadzone = float(options.get("deadzone", 0))
+            if 0 <= deadzone <= 0.5:
+                self.deadzone.set(deadzone * 100)
+            for name, flag in self.flags.items():
+                flag.set(options.get(name) == "1")
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError, StopIteration) as error:
+            self.message.set(f"Could not load controller settings: {error}")
+
+        book = ttk.Notebook(self.window)
+        book.pack(fill="both", expand=True)
+        device = tk.Frame(book, bg=PANEL, padx=12, pady=10)
+        bindings = tk.Frame(book, bg=PANEL, padx=12, pady=10)
+        book.add(device, text="Controller")
+        book.add(bindings, text="Bindings")
+        label(device, "Input source", bold=True).pack(anchor="w")
+        ttk.Combobox(device, state="readonly", style="RDNA.TCombobox", textvariable=self.source,
+                     values=tuple(PAD_SOURCES)).pack(fill="x", pady=(4, 9))
+        label(device, textvariable=self.devices, color=MUTED, wraplength=540).pack(anchor="w")
+        label(device, textvariable=self.pressed, wraplength=540, justify="left").pack(anchor="w", pady=(6, 4))
+        axes = tk.Frame(device, bg=PANEL)
+        axes.pack(fill="x")
+        self.axes = []
+        for index, name in enumerate(("Left X", "Left Y", "Right X", "Right Y", "L2 / LT", "R2 / RT")):
+            column, row = divmod(index, 3)
+            label(axes, name).grid(row=row, column=column * 2, sticky="w", padx=(0, 7))
+            meter = ttk.Progressbar(axes, length=125)
+            meter.grid(row=row, column=column * 2 + 1, sticky="ew", padx=(0, 14))
+            axes.columnconfigure(column * 2 + 1, weight=1)
+            self.axes.append(meter)
+        label(device, "Stick deadzone (%)", bold=True).pack(anchor="w", pady=(10, 0))
+        tk.Scale(device, from_=0, to=50, orient="horizontal", variable=self.deadzone, bg=PANEL,
+                 fg=FG, troughcolor=FIELD, highlightthickness=0).pack(fill="x")
+        for name, text in (("swap_sticks", "Swap left and right sticks"),
+                           ("invert_left_y", "Invert left stick Y"), ("invert_right_y", "Invert right stick Y")):
+            tk.Checkbutton(device, text=text, variable=self.flags[name], bg=PANEL, fg=FG,
+                           selectcolor=FIELD, activebackground=PANEL, activeforeground=FG).pack(anchor="w")
+
+        for index, target in enumerate(PAD_TARGETS):
+            column, row = divmod(index, 7)
+            cell = tk.Frame(bindings, bg=PANEL)
+            cell.grid(row=row, column=column, sticky="ew", pady=4, padx=(0, 10))
+            label(cell, target, size=10, bold=True).pack(anchor="w")
+            ttk.Combobox(cell, state="readonly", style="RDNA.TCombobox", width=18,
+                         values=PAD_BUTTONS, textvariable=self.bindings[index]).pack(side="left", fill="x", expand=True)
+            button(cell, "Bind", lambda i=index: self.start_capture(i)).pack(side="left", padx=(4, 0))
+        bindings.columnconfigure((0, 1), weight=1)
+
+        label(self.window, textvariable=self.message, color=MUTED, wraplength=540).pack(fill="x", pady=5)
+        footer = tk.Frame(self.window, bg=PANEL)
+        footer.pack(fill="x")
+        button(footer, "Restore defaults", self.defaults).pack(side="left")
+        button(footer, "Save", self.save, primary=True).pack(side="right")
+        button(footer, "Close", self.close).pack(side="right", padx=6)
+        binary = REPO / "target" / build / "victory.exe"
+        try:
+            self.process = subprocess.Popen(
+                [str(binary), "controllers", "--watch"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                text=True, creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            threading.Thread(target=self.read_inputs, args=(self.process,), daemon=True).start()
+            self.refresh_input()
+        except OSError:
+            self.devices.set("Live testing requires a rebuilt Copperframe executable.")
+
+    def defaults(self):
+        self.source.set(next(iter(PAD_SOURCES)))
+        self.deadzone.set(0)
+        for flag in self.flags.values():
+            flag.set(False)
+        for binding, value in zip(self.bindings, PAD_BUTTONS):
+            binding.set(value)
+        self.capture = None
+        self.message.set("Saved changes apply the next time a game starts.")
+
+    def read_inputs(self, process):
+        with process.stdout as output:
+            for line in output:
+                try:
+                    states = []
+                    for state in filter(None, line.strip().split("|")):
+                        source, slot, mask, *values = state.split(",")
+                        if source not in ("dualshock", "xinput") or len(values) != 6:
+                            raise ValueError("Invalid controller reading")
+                        states.append((source, int(slot), int(mask), tuple(map(float, values))))
+                except ValueError:
+                    continue
+                try:
+                    self.samples.get_nowait()
+                except queue.Empty:
+                    pass
+                self.samples.put_nowait(states)
+
+    def start_capture(self, index):
+        if self.last_pad is None:
+            self.message.set("Connect a controller and select its input source first.")
+            return
+        self.capture = index
+        self.message.set(f"Press the controller button for {PAD_TARGETS[index]}.")
+
+    def refresh_input(self):
+        try:
+            states = self.samples.get_nowait()
+        except queue.Empty:
+            states = None
+        if states is not None:
+            names = {"dualshock": "DualShock 4", "xinput": "XInput"}
+            connected = ", ".join(f"{names[source]} {slot + 1}" for source, slot, _, _ in states)
+            self.devices.set(f"Connected  {connected}" if connected else "No gamepad detected")
+            source = PAD_SOURCES[self.source.get()]
+            if source == "auto":
+                source = "dualshock" if any(state[0] == "dualshock" for state in states) else "xinput"
+            current = next((state for state in states if state[0] == source), None)
+            if current is None:
+                self.pressed.set("Buttons  —")
+                for axis in self.axes:
+                    axis.configure(value=0)
+                self.capture = None
+            else:
+                _, _, mask, values = current
+                pressed = [name for index, name in enumerate(PAD_BUTTONS[:-1]) if mask & (1 << index)]
+                self.pressed.set(f"Buttons  {', '.join(pressed) if pressed else '—'}")
+                for index, (axis, value) in enumerate(zip(self.axes, values)):
+                    axis.configure(value=(value + 1) * 50 if index < 4 else value * 100)
+                if self.capture is not None and self.last_pad is not None and self.last_pad[:2] == current[:2]:
+                    new = mask & ~self.last_pad[2]
+                    if new:
+                        self.bindings[self.capture].set(PAD_BUTTONS[(new & -new).bit_length() - 1])
+                        self.capture = None
+                        self.message.set("Binding set. Save to apply it the next time a game starts.")
+            self.last_pad = current
+        if self.process.poll() is None:
+            self.timer = self.window.after(35, self.refresh_input)
+        else:
+            self.devices.set("Live testing requires a rebuilt Copperframe executable.")
+
+    def save(self):
+        values = {
+            "source": PAD_SOURCES[self.source.get()],
+            "buttons": ",".join(str(PAD_BUTTONS.index(binding.get())) for binding in self.bindings),
+            "deadzone": f"{self.deadzone.get() / 100:.2f}",
+            **{name: int(flag.get()) for name, flag in self.flags.items()},
+        }
+        try:
+            self.profile.parent.mkdir(parents=True, exist_ok=True)
+            atomic_write(self.profile, "".join(f"{key}={value}\n" for key, value in values.items()))
+        except OSError as error:
+            self.message.set(f"Could not save controller settings: {error}")
+            return
+        self.message.set("Saved. These settings apply the next time a game starts.")
+
+    def close(self):
+        if self.timer is not None:
+            self.window.after_cancel(self.timer)
+        if self.process is not None:
+            self.process.terminate()
+        self.window.destroy()
+
+
 class Launcher:
     def __init__(self, root: tk.Tk, folder: Path):
         self.root = root
         self.library = folder / "games.json"
+        self.controller_profile = Path(os.environ.get("VICTORY_CONTROLLER_CONFIG") or folder / "controller.ini").expanduser().resolve()
+        self.controller_settings = None
         self.logs = folder / "logs"
         self.games = load_library(self.library)
         self.results = queue.Queue()
@@ -292,7 +500,14 @@ class Launcher:
 
     def make_window(self):
         root = self.root
-        root.title("VIctory-RDNA")
+        root.title("Copperframe")
+        self.icon = tk.PhotoImage(master=root, width=32, height=32)
+        self.icon.put(BG, to=(0, 0, 32, 32))
+        self.icon.put(ACCENT, to=(6, 6, 26, 10))
+        self.icon.put(ACCENT, to=(6, 10, 10, 26))
+        self.icon.put(ACCENT, to=(10, 22, 26, 26))
+        self.icon.put("#eac87d", to=(16, 14, 25, 18))
+        root.iconphoto(True, self.icon)
         width = min(990, root.winfo_screenwidth() - 70)
         height = min(720, root.winfo_screenheight() - 105)
         root.geometry(f"{width}x{height}")
@@ -310,7 +525,9 @@ class Launcher:
         root.grid_rowconfigure(1, weight=1)
         hero = tk.Frame(root, bg="#352536", padx=18, pady=12)
         hero.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 14))
-        label(hero, "VIctory-RDNA", size=28, color=ACCENT, bold=True).pack(fill="x")
+        if WINDOWS:
+            button(hero, "Controllers…", self.open_controllers).pack(side="right")
+        label(hero, "Copperframe", size=28, color=ACCENT, bold=True).pack(fill="x")
         platform = "Windows" if WINDOWS else "Linux · Wine"
         label(hero, f"Xbox Series game launcher  ·  {platform}", color="#ead4db").pack(fill="x")
 
@@ -531,6 +748,13 @@ class Launcher:
         if picked:
             self.runtime.set(picked)
 
+    def open_controllers(self):
+        if self.controller_settings is not None and self.controller_settings.window.winfo_exists():
+            self.controller_settings.window.lift()
+            return
+        build = "release" if self.build.get() == "Release" else "diag"
+        self.controller_settings = ControllerSettings(self.root, self.controller_profile, build)
+
     def open_path(self, path: Path | None):
         if path is None:
             return
@@ -556,11 +780,14 @@ class Launcher:
                 raise ValueError("Enter a whole FPS target of 0 or higher.")
             log = log_path(self.logs, game, self.requested_log.get().strip())
             runtime = self.runtime.get().strip()
+            overrides = parse_overrides(self.overrides.get("1.0", "end"))
+            if WINDOWS:
+                overrides.setdefault("VICTORY_CONTROLLER_CONFIG", str(self.controller_profile))
             session = Launch(
                 game=game, log=log, console=self.console.get(),
                 build="release" if self.build.get() == "Release" else "diag", fps=int(fps_text or "0"),
                 safe=self.safe.get(), ray_tracing=self.ray_tracing.get(), rebuild=self.rebuild.get(),
-                overrides=parse_overrides(self.overrides.get("1.0", "end")),
+                overrides=overrides,
                 runtime=Path(runtime).expanduser().resolve() if runtime else None,
             )
             log.parent.mkdir(parents=True, exist_ok=True)
@@ -601,7 +828,7 @@ def main() -> int:
     try:
         root = tk.Tk()
     except tk.TclError as error:
-        print(f"VIctory-RDNA could not open a desktop window: {error}", file=sys.stderr)
+        print(f"Copperframe could not open a desktop window: {error}", file=sys.stderr)
         return 1
     root.withdraw()
     try:
@@ -611,7 +838,7 @@ def main() -> int:
             root.deiconify()
             root.mainloop()
     except (OSError, ValueError, RuntimeError) as error:
-        messagebox.showerror("VIctory-RDNA", str(error), parent=root)
+        messagebox.showerror("Copperframe", str(error), parent=root)
         root.destroy()
         return 1
     return 0
