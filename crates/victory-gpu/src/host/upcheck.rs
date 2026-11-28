@@ -217,7 +217,7 @@ impl Looks {
     }
 
     /// The submission has run: what it found is counted.
-    pub(super) fn read(self) {
+    pub(super) fn read(&self) {
         // SAFETY: the mapping holds an answer for each; the card has run.
         let answers = unsafe { std::slice::from_raw_parts(self.found.1 as *const [u32; 4], self.of.len()) };
         let mut stale = STALE.lock().unwrap_or_else(|e| e.into_inner());

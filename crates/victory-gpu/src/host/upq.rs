@@ -210,10 +210,15 @@ pub(super) unsafe fn send(
 }
 
 /// A plan's slot, back once its submission has run.
-pub(super) fn give_back(slot: Slot) {
+pub(super) fn give_back(slot: Slot, release: Option<&mut super::release::Batch>) {
     let mut guard = QUEUE.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(Some(q)) = guard.as_mut() {
         q.free.push(slot);
+        return;
+    }
+    drop(guard);
+    if let Some(release) = release {
+        release.push(slot);
     }
 }
 

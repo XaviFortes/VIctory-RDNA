@@ -644,11 +644,14 @@ impl Taken {
     }
 
     /// The submission has run and landed: the list and its buffer are free.
-    pub(super) fn landed(self) {
+    pub(super) fn landed(self, release: &mut super::release::Batch) {
         // The host copies its steps held go; its commands stay until the
         // next use resets it.
-        drop(std::mem::take(&mut *self.own.list.deferred()));
+        self.own.list.discard_deferred(Some(release));
         POOL.lock().unwrap_or_else(|e| e.into_inner()).push(self.own);
+        if !self.copied.is_empty() {
+            release.push(self.copied);
+        }
     }
 }
 

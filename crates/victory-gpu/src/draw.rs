@@ -655,20 +655,46 @@ impl State {
     /// shortcut: a list the title runs a second time without a reset then
     /// reads slots others may have taken (logged once).
     pub(crate) fn tables_done(&mut self) {
-        if self.tables_gone && self.dynamic.is_empty() {
+        if self.mark_tables_done() {
+            crate::descriptor::release_dynamic_many(&self.dynamic);
+            self.dynamic.clear();
+            self.fresh_tables.clear();
+            self.root_srv_slots.clear();
+            self.root_uav_slots.clear();
+        }
+    }
+
+    /// Gather slots for immediate reuse after a flight. Keep the host
+    /// resources referenced by the old recording for background destruction.
+    pub(crate) fn tables_done_beside(
+        &mut self,
+        slots: &mut Vec<(usize, u32, u32)>,
+        release: &mut crate::host::release::Batch,
+    ) {
+        if !self.mark_tables_done() {
             return;
+        }
+        slots.append(&mut self.dynamic);
+        if !self.fresh_tables.is_empty() || !self.root_srv_slots.is_empty() || !self.root_uav_slots.is_empty() {
+            release.push((
+                std::mem::take(&mut self.fresh_tables),
+                std::mem::take(&mut self.root_srv_slots),
+                std::mem::take(&mut self.root_uav_slots),
+            ));
+        }
+    }
+
+    fn mark_tables_done(&mut self) -> bool {
+        if self.tables_gone && self.dynamic.is_empty() {
+            return false;
         }
         if self.tables_gone {
             static ONCE: std::sync::Once = std::sync::Once::new();
             ONCE.call_once(|| tracing::warn!("a list ran again after its descriptor tables were given back"));
         }
-        crate::descriptor::release_dynamic_many(&self.dynamic);
-        self.dynamic.clear();
-        self.fresh_tables.clear();
         self.recording = 0;
-        self.root_srv_slots.clear();
-        self.root_uav_slots.clear();
         self.tables_gone = true;
+        true
     }
 }
 
@@ -770,7 +796,6 @@ pub(crate) static HEAP_BUFFER_PASSES: AtomicU64 = AtomicU64::new(0);
 pub(crate) static HEAP_BUFFER_MICROS: AtomicU64 = AtomicU64::new(0);
 /// Of the passes, nanoseconds since the last frame line: looking at slots,
 /// the spans and refreshes of their copies, the texture side.
-#[cfg(feature = "diagnostics")]
 pub(crate) static HEAP_SPLIT: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
 
 /// Passes after which every buffer slot of the heap was looked at again.
@@ -841,18 +866,20 @@ impl BufferSweep {
         self.dirty_parts = 0;
     }
 
-    fn forget_part(&mut self, part: u32) {
-        self.ranges.forget_part(part, HEAP_ROUND as u32);
+    fn retain_part(&mut self, part: u32, live: &[u32]) {
         let p = part as usize;
-        self.part_spans[p].clear();
-        self.part_views[p] = 0;
-        self.dirty_parts &= !(1u16 << p);
+        let removed = self.ranges.retain_part(part, HEAP_ROUND as u32, live);
+        if removed != 0 {
+            self.part_views[p] -= removed;
+            self.dirty_parts |= 1u16 << p;
+        }
     }
 
     fn set(&mut self, slot: u32, range: Option<(std::sync::Arc<crate::shadow::Shadow>, u64, u64)>) {
         let p = (slot as usize) % (HEAP_ROUND as usize);
-        let old = self.ranges.replace(slot, range.clone());
-        match (&old, &range) {
+        let old = self.ranges.replace(slot, range);
+        let range = self.ranges.0.get(slot as usize).and_then(Option::as_ref);
+        match (&old, range) {
             (None, Some(_)) => self.part_views[p] += 1,
             (Some(_), None) => self.part_views[p] -= 1,
             _ => {}
@@ -862,7 +889,7 @@ impl BufferSweep {
         }
         if let Some((old_shadow, old_from, old_to)) = old {
             let old_key = std::sync::Arc::as_ptr(&old_shadow) as usize;
-            if let Some((new_shadow, new_from, new_to)) = &range {
+            if let Some((new_shadow, new_from, new_to)) = range {
                 let new_key = std::sync::Arc::as_ptr(new_shadow) as usize;
                 if old_key == new_key && old_from == *new_from && old_to == *new_to {
                     return;
@@ -881,10 +908,10 @@ impl BufferSweep {
             return;
         }
         if let Some((shadow, from, to)) = range {
-            let key = std::sync::Arc::as_ptr(&shadow) as usize;
-            let span = self.part_spans[p].entry(key).or_insert_with(|| (shadow, from, to));
-            span.1 = span.1.min(from);
-            span.2 = span.2.max(to);
+            let key = std::sync::Arc::as_ptr(shadow) as usize;
+            let span = self.part_spans[p].entry(key).or_insert_with(|| (shadow.clone(), *from, *to));
+            span.1 = span.1.min(*from);
+            span.2 = span.2.max(*to);
         }
     }
 
@@ -936,10 +963,21 @@ impl<T> HeapRanges<T> {
         std::mem::replace(&mut self.0[slot], range)
     }
 
-    /// Forgets the slots of one of `parts` parts
-    /// (`HostHeap::buffer_slots_of`).
-    fn forget_part(&mut self, part: u32, parts: u32) {
-        self.0.iter_mut().skip(part as usize).step_by(parts as usize).for_each(|r| *r = None);
+    /// Remove cached ranges absent from the ordered live slots in this part.
+    /// Live slots are still looked up again and replaced with what they hold.
+    fn retain_part(&mut self, part: u32, parts: u32, live: &[u32]) -> u32 {
+        let mut live = live.iter().copied().peekable();
+        let mut removed = 0;
+        for (n, range) in self.0.iter_mut().skip(part as usize).step_by(parts as usize).enumerate() {
+            let slot = part + n as u32 * parts;
+            if live.peek() == Some(&slot) {
+                live.next();
+            } else if range.is_some() {
+                *range = None;
+                removed += 1;
+            }
+        }
+        removed
     }
 
     fn part_ranges(&self, part: u32, parts: u32) -> impl Iterator<Item = &(T, u64, u64)> {
@@ -954,7 +992,7 @@ impl<T> HeapRanges<T> {
 
 #[cfg(test)]
 mod heap_range_tests {
-    use super::{HEAP_ROUND, HeapRanges};
+    use super::{BufferSweep, HEAP_ROUND, HeapRanges};
 
     /// Round by round every slot is looked at again once, whatever was
     /// written between, and what a slot holds is what was found last.
@@ -970,9 +1008,9 @@ mod heap_range_tests {
         let parts = HEAP_ROUND as u32;
         for pass in 1..=HEAP_ROUND {
             let part = (pass % HEAP_ROUND) as u32;
-            ranges.forget_part(part, parts);
-            for slot in (0..SLOTS).step_by(3).filter(|slot| slot % parts == part) {
-                assert!(ranges.0[slot as usize].is_none(), "slot {slot} not forgotten");
+            let live: Vec<_> = (0..SLOTS).step_by(3).filter(|slot| slot % parts == part).collect();
+            assert_eq!(ranges.retain_part(part, parts, &live), 0);
+            for slot in live {
                 ranges.set(slot, Some(((), pass, pass)));
             }
             assert_eq!(ranges.ranges().count(), SLOTS.div_ceil(3) as usize);
@@ -980,6 +1018,32 @@ mod heap_range_tests {
         assert!(ranges.ranges().all(|r| r.1 != 0), "a slot not looked at in a round");
         ranges.set(3, None);
         assert_eq!(ranges.ranges().count(), SLOTS.div_ceil(3) as usize - 1);
+    }
+
+    #[test]
+    fn revalidation_removes_missing_slots_only_in_its_part() {
+        let mut ranges = HeapRanges(Vec::new());
+        for slot in [0, 1, 16, 17, 32, 48] {
+            ranges.set(slot, Some(((), u64::from(slot), u64::from(slot) + 1)));
+        }
+        assert_eq!(ranges.retain_part(0, 16, &[0, 32, 64]), 2);
+        assert_eq!(ranges.ranges().map(|&(_, from, _)| from).collect::<Vec<_>>(), [0, 1, 17, 32]);
+    }
+
+    #[test]
+    fn retiring_a_slot_shrinks_the_cached_span() {
+        let copy = crate::shadow::Shadow::unbacked(0x10000, std::ptr::null_mut(), 4096, false);
+        let mut sweep = BufferSweep::default();
+        sweep.set(0, Some((copy.clone(), 0x10000, 0x10040)));
+        sweep.set(16, Some((copy.clone(), 0x10100, 0x10140)));
+        sweep.set(1, Some((copy, 0x10080, 0x100c0)));
+        assert_eq!(sweep.spans().1, 3);
+
+        sweep.retain_part(0, &[0]);
+        let (spans, views) = sweep.spans();
+        assert_eq!(views, 2);
+        let (_, from, to) = spans.into_values().next().unwrap();
+        assert_eq!((from, to), (0x10000, 0x100c0));
     }
 
     /// The spans of 4,400 copies from the ranges of 72,000 slots, as a pass
@@ -1162,6 +1226,7 @@ fn set(roots: &mut Vec<Root>, slot: u32, root: Root) {
 /// they show are to be refreshed.
 fn heap_buffer_pass(heap: &crate::descriptor::Heap, host: &crate::descriptor::host::HostHeap, frame: u64) -> Vec<crate::host::aside::Refresh> {
     let started = std::time::Instant::now();
+    let profile = cfg!(feature = "diagnostics") || crate::host::submit_profile();
     // Per host heap: the host copy and range each slot's buffer view
     // reads, kept from pass to pass. Only the slots written since the
     // last pass are looked at again (83,000 slots a pass otherwise, 0.1 s
@@ -1178,8 +1243,8 @@ fn heap_buffer_pass(heap: &crate::descriptor::Heap, host: &crate::descriptor::ho
         // The written ones, and this pass's part of the others (deduplicated so
         // slots in both `part` and `changed` are not looked up twice).
         let part = (kept.passes % HEAP_ROUND) as u32;
-        kept.forget_part(part);
         let mut slots = host.buffer_slots_of::<{ HEAP_ROUND as u32 }>(part);
+        kept.retain_part(part, &slots);
         if !changed.is_empty() {
             slots.extend(changed);
             slots.sort_unstable();
@@ -1257,8 +1322,7 @@ fn heap_buffer_pass(heap: &crate::descriptor::Heap, host: &crate::descriptor::ho
     if crate::picked::on() {
         crate::picked::shown(unordered, all);
     }
-    #[cfg(feature = "diagnostics")]
-    let looked = std::time::Instant::now();
+    let looked = profile.then(std::time::Instant::now);
     // Per host copy, the span its picked views cover (merged from the cached
     // per-part spans rather than rescanning every slot in `ranges`).
     let (spans, views) = kept.spans();
@@ -1291,13 +1355,11 @@ fn heap_buffer_pass(heap: &crate::descriptor::Heap, host: &crate::descriptor::ho
     }
     kept.unwatched = next_unwatched;
     drop(kept);
-    #[cfg(feature = "diagnostics")]
-    let refreshed = std::time::Instant::now();
-    crate::watch::look_at_holes();
-    #[cfg(feature = "diagnostics")]
-    for (sum, time) in HEAP_SPLIT.iter().zip([looked - started, refreshed - looked]) {
-        sum.fetch_add(time.as_nanos() as u64, Ordering::Relaxed);
+    if let Some(looked) = looked {
+        HEAP_SPLIT[0].fetch_add((looked - started).as_nanos() as u64, Ordering::Relaxed);
+        HEAP_SPLIT[1].fetch_add(looked.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
+    crate::watch::look_at_holes();
     static LOGGED: AtomicU64 = AtomicU64::new(0);
     // The first pass and every growth of the set by half.
     let seen = LOGGED.load(Ordering::Relaxed);
@@ -2416,13 +2478,13 @@ impl State {
                 shadow.refresh(list, from, to - from);
             }
         }
-        #[cfg(feature = "diagnostics")]
-        let refreshed = std::time::Instant::now();
+        let profiled = (cfg!(feature = "diagnostics") || crate::host::submit_profile()).then(std::time::Instant::now);
         stage.next("the heap pass: textures");
         self.heap_textures(list, heap, host);
         stage.end();
-        #[cfg(feature = "diagnostics")]
-        HEAP_SPLIT[2].fetch_add(refreshed.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        if let Some(profiled) = profiled {
+            HEAP_SPLIT[2].fetch_add(profiled.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        }
         HEAP_BUFFER_PASSES.fetch_add(1, Ordering::Relaxed);
         HEAP_BUFFER_MICROS.fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
         Some(gpu)

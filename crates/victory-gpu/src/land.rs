@@ -118,7 +118,11 @@ pub(crate) mod stat {
     pub(crate) const HAD_BYTES: usize = 24;
     /// Jobs.
     pub(crate) const JOBS: usize = 25;
-    pub(crate) const COUNT: usize = 26;
+    pub(crate) const TEXTURE_READBACKS: usize = 26;
+    pub(crate) const BUFFER_READBACKS: usize = 27;
+    pub(crate) const CARD_RETIRE: usize = 28;
+    pub(crate) const TABLES: usize = 29;
+    pub(crate) const COUNT: usize = 30;
 }
 
 static STATS: [AtomicU64; stat::COUNT] = [const { AtomicU64::new(0) }; stat::COUNT];
@@ -174,6 +178,13 @@ pub(crate) fn log(frames: f64) {
         ms(stat::READ_BACKS),
         ms(stat::TOLD),
         ms(stat::REST),
+    );
+    tracing::info!(
+        "relay read-backs and lists per frame: {:.2} ms texture readbacks, {:.2} ms buffer readbacks, {:.2} ms returning card work and queuing drops, {:.2} ms returning descriptor slots",
+        ms(stat::TEXTURE_READBACKS),
+        ms(stat::BUFFER_READBACKS),
+        ms(stat::CARD_RETIRE),
+        ms(stat::TABLES),
     );
     tracing::info!(
         "landed per frame: {:.0} pieces, {:.0} with a new byte; of their {:.0} pages of 4 KiB {:.0} with a new byte ({:.1} MB), \

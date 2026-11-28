@@ -160,12 +160,20 @@ fn memory(host: &Host, size: u64) -> Option<Memory> {
 }
 
 /// The submission has run.
-pub(super) fn give_back(memory: Memory) {
+pub(super) fn give_back(memory: Memory, release: Option<&mut super::release::Batch>) {
+    let mut evicted = Vec::new();
     let mut spare = SPARE.lock().unwrap_or_else(|e| e.into_inner());
     spare.push(memory);
     spare.sort_by_key(|m| std::cmp::Reverse(m.size));
-    while spare.iter().map(|m| m.size).sum::<u64>() > kept() {
-        spare.remove(0);
+    let mut total = spare.iter().map(|m| m.size).sum::<u64>();
+    while total > kept() {
+        let removed = spare.remove(0);
+        total -= removed.size;
+        evicted.push(removed);
+    }
+    drop(spare);
+    if let Some(release) = release && !evicted.is_empty() {
+        release.push(evicted);
     }
 }
 

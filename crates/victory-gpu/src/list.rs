@@ -210,6 +210,14 @@ impl Detached {
     pub(crate) fn release_tables(&mut self) {
         self._state.tables_done();
     }
+
+    pub(crate) fn release_tables_beside(
+        &mut self,
+        slots: &mut Vec<(usize, u32, u32)>,
+        release: &mut crate::host::release::Batch,
+    ) {
+        self._state.tables_done_beside(slots, release);
+    }
 }
 
 /// A host list that has run and waits to be used again, and the bytes of
@@ -272,7 +280,7 @@ fn fresh_list() -> Option<crate::host::HostList> {
 /// what they held is let go, as before, and the host lists are reset and
 /// kept for [`fresh_list`].
 #[cfg(windows)]
-pub(crate) fn recycle(lists: Vec<Detached>, ran: &[usize]) {
+pub(crate) fn recycle(lists: Vec<Detached>, ran: &[usize], mut release: Option<&mut crate::host::release::Batch>) {
     if !pools() {
         return;
     }
@@ -285,7 +293,7 @@ pub(crate) fn recycle(lists: Vec<Detached>, ran: &[usize]) {
         }
         // As the title's reset does: what the list kept for its commands
         // goes, its allocators stay.
-        host.reset();
+        host.reset_recycled(release.as_deref_mut());
         let bytes = host.scratch_kept();
         let mut idle = IDLE.lock().unwrap_or_else(|e| e.into_inner());
         if idle.0.len() < IDLE_MOST.0 && idle.1 + bytes <= IDLE_MOST.1 {

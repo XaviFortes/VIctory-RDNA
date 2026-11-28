@@ -398,7 +398,7 @@ pub(crate) fn release_held(all: bool) {
                             };
                             // They have run: their host lists are used again.
                             if ran {
-                                crate::list::recycle(lists, &order);
+                                crate::list::recycle(lists, &order, None);
                             }
                         }
                         if all {
