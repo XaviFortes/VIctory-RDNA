@@ -589,15 +589,23 @@ pub(crate) fn retire<T: 'static>(object: T) {
 
 /// [`retire`] for a resource.
 pub(crate) fn retire_resource(object: ID3D12Resource) {
+    retire_resources(std::iter::once(object));
+}
+
+/// Retires every replaced descriptor resource against the same fence point.
+pub(crate) fn retire_resources(resources: impl ExactSizeIterator<Item = ID3D12Resource>) {
+    let count = resources.len() as u64;
+    if count == 0 {
+        return;
+    }
     let queued = crate::queue::queued();
     let started = STARTED.load(Ordering::Acquire) + queued;
     if bury_lag() == 0 && started <= FINISHED.load(Ordering::Acquire) {
-        RETIREMENTS[0].fetch_add(1, Ordering::Relaxed);
-        drop(object);
+        RETIREMENTS[0].fetch_add(count, Ordering::Relaxed);
         return;
     }
-    RETIREMENTS[1].fetch_add(1, Ordering::Relaxed);
-    retired().push_back((started, Retired::Resource(object)));
+    RETIREMENTS[1].fetch_add(count, Ordering::Relaxed);
+    retired().extend(resources.map(|object| (started, Retired::Resource(object))));
 }
 
 /// How many submissions later than it could (the last one that may use it

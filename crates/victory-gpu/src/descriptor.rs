@@ -1480,6 +1480,15 @@ fn record(handle: u64, view: View) {
     mirror(handle);
 }
 
+#[cfg(windows)]
+static VIEW_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Changes when a live view record is about to become stale.
+#[cfg(windows)]
+pub(crate) fn view_revision() -> u64 {
+    VIEW_REVISION.load(std::sync::atomic::Ordering::Acquire)
+}
+
 /// The title released `resource`: the views naming it go stale.
 pub(crate) fn forget(resource: usize) {
     #[cfg(windows)]
@@ -1491,6 +1500,8 @@ pub(crate) fn forget(resource: usize) {
     let Some(entries) = views.by_resource.remove(&resource) else {
         return;
     };
+    #[cfg(windows)]
+    VIEW_REVISION.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     for i in entries {
         let (view, generation) = views.list[i as usize].clone();
         // Entries freed through a view's other resource may hold another
@@ -1520,6 +1531,11 @@ fn view_at(i: u32, generation: u32) -> Option<View> {
         PLACED => views_read().placed_of(i, generation),
         _ => None,
     }
+}
+
+#[cfg(windows)]
+pub(crate) fn view_record([_, index, generation]: [u32; 3]) -> Option<View> {
+    view_at(index, generation)
 }
 
 /// The words of the record at `handle`, if they are a view's.

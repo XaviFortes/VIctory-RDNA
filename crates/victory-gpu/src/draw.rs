@@ -43,6 +43,13 @@ struct TableGroup {
     by_descriptor: Vec<(u32, usize)>,
 }
 
+#[derive(Clone, Copy)]
+struct TableBinding {
+    table: u64,
+    heap: Option<(&'static crate::descriptor::Heap, &'static crate::descriptor::host::HostHeap)>,
+    snapshot: bool,
+}
+
 impl TablePlan {
     pub(crate) fn new(used: &[UsedResource], indexed: &[RootIndexedView]) -> Self {
         let mut slots: Vec<_> = used
@@ -623,6 +630,8 @@ pub(crate) struct State {
     /// Tables made afresh in this list: (table, slot count, contents) → first
     /// dynamic slot.
     fresh_tables: std::collections::HashMap<(u64, u32, u64), FreshTable, std::hash::BuildHasherDefault<crate::host::AddressHash>>,
+    snapshot_copies: crate::descriptor::host::SnapshotCopies,
+    table_reads: TableReads,
     /// The dynamic slots the list holds: title heap, first, count; given
     /// back when the list has run, is reset or released.
     dynamic: Vec<(usize, u32, u32)>,
@@ -3793,27 +3802,41 @@ impl State {
         }
     }
 
-    fn table_entry(&self, list: &HostList, u: &UsedResource, compute: bool) {
-        let Some(Root::Table(table)) = self.roots_ref(compute).get(usize::from(u.slot)) else {
+    fn table_entry(&mut self, list: &HostList, u: &UsedResource, binding: TableBinding) {
+        let Some(handle) = binding.table.checked_add(u64::from(u.table_offset_dwords) * 4) else {
             return;
         };
-        let handle = table + u64::from(u.table_offset_dwords) * 4;
-        let Some((heap, index)) = self.bound_heaps.iter().flatten().find_map(|heap| {
-            heap.index(handle).map(|index| (*heap, index))
+        let resolved = binding.heap.and_then(|(heap, host)| heap.index(handle).map(|index| (host, index)));
+        let Some((host, index)) = resolved.or_else(|| {
+            let heap = self.heap_of(handle)?;
+            Some((heap.host()?, heap.index(handle)?))
         }) else {
             return;
         };
-        let Some(host) = heap.host() else {
-            return;
-        };
-        if let Some(view) = host.mirror(index, handle, true) {
-            readable(list, u.kind, &view);
-            // Up to date by this draw: not the texture pass's to make.
-            if crate::descriptor::host::is_texture_view(&view) {
-                host.texture_slot_tabled(index, true);
+
+        let texture = if u.kind == ResourceType::Srv && ready_once() && index < host.count()
+            && let Some(words) = crate::descriptor::record_at(handle)
+        {
+            let revision = crate::descriptor::view_revision();
+            if host.quick_record(index, words)
+                && let Some(read) = self.table_reads.get(list, words, revision)
+            {
+                read.note_depth();
+                read.texture
             } else {
-                host.slot_tabled(index);
+                let Some(view) = host.mirror_words(index, handle, true, words) else { return };
+                self.table_reads.read(list, words, revision, &view)
             }
+        } else {
+            let Some(view) = host.mirror(index, handle, true) else { return };
+            readable(list, u.kind, &view);
+            crate::descriptor::host::is_texture_view(&view)
+        };
+        // Mark the draw's title slot even when another slot views the same resource.
+        if texture {
+            host.texture_slot_tabled(index, true);
+        } else {
+            host.slot_tabled(index);
         }
     }
 
@@ -3836,48 +3859,34 @@ impl State {
         table_ns: Option<&mut [u64; TablePhase::Count as usize]>,
     ) -> Few<(u8, u32), 16> {
         let mut sample = table_ns.map(|ns| (ns, std::time::Instant::now()));
-        let mut fresh = [0u64; 4];
-        let selected_slot = |mask: &[u64; 4], slot: u8| mask[usize::from(slot / 64)] & (1u64 << (slot % 64)) != 0;
+        let mut bindings = Few::<Option<TableBinding>, 16>::default();
+        let roots = self.roots_ref(compute);
         for group in &plan.groups {
-            let slot = group.slot;
-            let needs_snapshot = group.has_cbv
-                || match self.roots_ref(compute).get(usize::from(slot)) {
-                    Some(&Root::Table(table)) => self.heap_of(table).is_some_and(|heap| {
-                        heap.host()
-                            .is_some_and(|host| group.needs_snapshot(heap, host.count(), table))
-                    }),
-                    _ => false,
-                };
-            if needs_snapshot {
-                fresh[usize::from(slot / 64)] |= 1u64 << (slot % 64);
-            }
+            let Some(&Root::Table(table)) = roots.get(usize::from(group.slot)) else {
+                bindings.push(None);
+                continue;
+            };
+            let heap = self.heap_of(table).and_then(|heap| Some((heap, heap.host()?)));
+            let snapshot = group.has_cbv
+                || heap.is_some_and(|(heap, host)| group.needs_snapshot(heap, host.count(), table));
+            bindings.push(Some(TableBinding { table, heap, snapshot }));
         }
         for &(g, e) in &plan.direct {
-            let group = &plan.groups[g];
-            if !selected_slot(&fresh, group.slot) {
-                self.table_entry(list, &group.entries[e], compute);
+            if let Some(binding) = bindings[g] && !binding.snapshot {
+                self.table_entry(list, &plan.groups[g].entries[e], binding);
             }
         }
         mark_table(&mut sample, TablePhase::Direct);
         let mut made = Few::default();
-        for group in &plan.groups {
+        for (group, binding) in plan.groups.iter().zip(bindings.iter()) {
+            let Some(TableBinding { table, heap: Some((heap, host)), snapshot: true }) = *binding else {
+                continue;
+            };
             let slot = group.slot;
-            if !selected_slot(&fresh, slot) {
-                continue;
-            }
-            let Some(&Root::Table(table)) = self.roots_ref(compute).get(usize::from(slot)) else {
-                continue;
-            };
             let entries = &group.entries;
-            let Some(heap) = self.heap_of(table) else {
-                continue;
-            };
             if heap.samplers() || (table - heap.start) % 32 != 0 {
                 continue;
             }
-            let Some(host) = heap.host() else {
-                continue;
-            };
             let mut selected: Few<u32, 16> = Few::default();
             for index in &group.indexed {
                 let constant = self.user_value(
@@ -3910,20 +3919,28 @@ impl State {
                 (table, n, h.0)
             };
             // Who reads of it, and as what, as far as [`readable`] goes by it.
-            let reader = (std::ptr::from_ref(plan) as usize, plan.direct.len(), STORES.get(), TESTED_DEPTH.get().0);
+            let reader = TableReader {
+                plan: std::ptr::from_ref(plan) as usize,
+                entries: plan.direct.len(),
+                slot,
+                stores: STORES.get(),
+                depth: TESTED_DEPTH.get().0,
+            };
+            let revision = crate::descriptor::view_revision();
+            let once = ready_once() && selected.is_empty() && !group.has_uav;
             let known = self.fresh_tables.get_mut(&key);
             mark_table(&mut sample, TablePhase::Lookup);
             if let Some(known) = known {
                 let first = known.first;
                 // This reader had it brought up to date, and nothing in the
                 // list changed since: nothing to do again.
-                let once = ready_once() && selected.is_empty() && !group.has_uav;
                 if once
                     && known.epoch == list.epoch()
+                    && known.revision == revision
                     && let Some((_, depth)) = known.ready.iter().find(|(r, _)| *r == reader)
                 {
                     if *depth {
-                        TESTED_DEPTH.set((reader.3, true));
+                        TESTED_DEPTH.set((reader.depth, true));
                     }
                     made.push((slot, first * 32));
                     mark_table(&mut sample, TablePhase::Reuse);
@@ -3933,7 +3950,9 @@ impl State {
                 TESTED_DEPTH.set((depth_before.0, false));
                 for u in entries.iter().filter(|u| u.kind != ResourceType::Cbv) {
                     let handle = table + u64::from(u.table_offset_dwords) * 4;
-                    if let Some(view) = crate::descriptor::view(handle) {
+                    if u.kind == ResourceType::Srv && ready_once() {
+                        self.table_reads.read_slot(list, handle);
+                    } else if let Some(view) = crate::descriptor::view(handle) {
                         readable(list, u.kind, &view);
                     }
                 }
@@ -3950,12 +3969,13 @@ impl State {
                 }
                 let depth = TESTED_DEPTH.get().1;
                 TESTED_DEPTH.set((depth_before.0, depth_before.1 || depth));
-                if once && let Some(known) = self.fresh_tables.get_mut(&key) {
+                if once && crate::descriptor::view_revision() == revision {
                     // (The epoch as it is now: what this changed itself it
                     // need not do again.)
                     let epoch = list.epoch();
-                    if known.epoch != epoch {
+                    if known.epoch != epoch || known.revision != revision {
                         known.epoch = epoch;
+                        known.revision = revision;
                         known.ready.clear();
                     }
                     if known.ready.len() < 16 {
@@ -3973,7 +3993,7 @@ impl State {
                 mark_table(&mut sample, TablePhase::Create);
                 continue;
             };
-            self.fresh_tables.insert(key, FreshTable { first, epoch: 0, ready: Vec::new() });
+            self.fresh_tables.insert(key, FreshTable { first, epoch: 0, revision: 0, ready: Vec::new() });
             self.dynamic
                 .push((std::ptr::from_ref(heap) as usize, first, n));
             // The title's own slots of this table: what the draw reads of
@@ -4008,23 +4028,20 @@ impl State {
                     .map(|&(_, entry)| &group.entries[entry]);
                 // A view this list has made before: its descriptor copied,
                 // and nothing more if nothing changed in the list since.
-                if list_views
-                    && let Some(words) = crate::descriptor::record_at(table + u64::from(k) * 32)
-                    && let Some(mut listed) = host.make_listed(recording, words, index)
-                {
+                let handle = table + u64::from(k) * 32;
+                let use_view = |view: &View, listed: &mut crate::descriptor::host::Listed| {
                     let kind = used
                         .map(|u| u.kind)
                         .or_else(|| selected.binary_search(&k).ok().and(listed.kind));
-                    let was = (listed.ready, listed.tabled);
                     if let Some(kind) = kind {
                         let tested = TESTED_DEPTH.get();
                         if kind == ResourceType::Srv && listed.ready.0 == list.epoch() && listed.ready.1 == tested.0 {
                             if listed.ready.2 {
                                 TESTED_DEPTH.set((tested.0, true));
                             }
-                        } else if let Some(view) = crate::descriptor::host::listed_view(recording, words) {
+                        } else {
                             TESTED_DEPTH.set((tested.0, false));
-                            readable(list, kind, &view);
+                            readable(list, kind, view);
                             let depth = TESTED_DEPTH.get().1;
                             TESTED_DEPTH.set((tested.0, tested.1 || depth));
                             if kind == ResourceType::Srv {
@@ -4039,15 +4056,17 @@ impl State {
                         listed.tabled = Some((title + k, kind.is_some()));
                         host.texture_slot_tabled(title + k, kind.is_some());
                         if kind.is_some() {
-                            host.mirror_after(list, title + k, table + u64::from(k) * 32);
+                            host.mirror_after(list, title + k, handle);
                         }
                     }
-                    if was != (listed.ready, listed.tabled) {
-                        crate::descriptor::host::note_listed(recording, words, listed);
-                    }
+                };
+                if list_views
+                    && let Some(words) = crate::descriptor::record_at(handle)
+                    && host.make_listed(recording, words, index, &mut self.snapshot_copies, use_view).is_some()
+                {
                     continue;
                 }
-                match crate::descriptor::view(table + u64::from(k) * 32) {
+                match crate::descriptor::view(handle) {
                     Some(View::Constant(address, size)) => {
                         // Renderer port 5: title memory in place is the
                         // card's to read where it is; nothing is copied.
@@ -4089,7 +4108,7 @@ impl State {
                         {
                             host.texture_slot_tabled(title + k, kind.is_some());
                             if kind.is_some() {
-                                host.mirror_after(list, title + k, table + u64::from(k) * 32);
+                                host.mirror_after(list, title + k, handle);
                             }
                         }
                     }
@@ -4101,6 +4120,7 @@ impl State {
                     }
                 }
             }
+            self.snapshot_copies.finish(host);
             made.push((slot, first * 32));
             mark_table(&mut sample, TablePhase::Create);
         }
@@ -4884,7 +4904,92 @@ struct FreshTable {
     /// tested depth target) read were brought up to date, and whether that read the
     /// tested depth target.
     epoch: u64,
-    ready: Vec<((usize, usize, bool, usize), bool)>,
+    revision: u64,
+    ready: Vec<(TableReader, bool)>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct TableReader {
+    plan: usize,
+    entries: usize,
+    slot: u8,
+    stores: bool,
+    depth: usize,
+}
+
+#[derive(Clone, Copy, Default)]
+struct TableRead {
+    words: [u32; 3],
+    epoch: u64,
+    revision: u64,
+    depth: usize,
+    read_depth: bool,
+    texture: bool,
+}
+
+impl TableRead {
+    fn note_depth(self) {
+        if self.read_depth {
+            TESTED_DEPTH.set((self.depth, true));
+        }
+    }
+}
+
+/// Recently prepared object SRVs in this list. Keep this bounded since most
+/// entries are seen again nearby, including when another table uses them.
+#[derive(Default)]
+struct TableReads(Box<[TableRead]>);
+
+impl TableReads {
+    const SLOTS: usize = 128;
+
+    fn index([_, index, generation]: [u32; 3]) -> usize {
+        (index ^ generation) as usize % Self::SLOTS
+    }
+
+    fn get(&self, list: &HostList, words: [u32; 3], revision: u64) -> Option<TableRead> {
+        let read = *self.0.get(Self::index(words))?;
+        (read.words == words && read.epoch == list.epoch()
+            && read.revision == revision && read.depth == TESTED_DEPTH.get().0)
+            .then_some(read)
+    }
+
+    fn read(&mut self, list: &HostList, words: [u32; 3], revision: u64, view: &View) -> bool {
+        if !matches!(view, View::Shader(..)) {
+            readable(list, ResourceType::Srv, view);
+            return crate::descriptor::host::is_texture_view(view);
+        }
+        let (depth, was_read) = TESTED_DEPTH.get();
+        TESTED_DEPTH.set((depth, false));
+        readable(list, ResourceType::Srv, view);
+        let read_depth = TESTED_DEPTH.get().1;
+        TESTED_DEPTH.set((depth, was_read || read_depth));
+        let texture = crate::descriptor::host::is_texture_view(view);
+        if crate::descriptor::view_revision() == revision {
+            if self.0.is_empty() {
+                self.0 = vec![TableRead::default(); Self::SLOTS].into_boxed_slice();
+            }
+            self.0[Self::index(words)] = TableRead {
+                words,
+                epoch: list.epoch(),
+                revision,
+                depth,
+                read_depth,
+                texture,
+            };
+        }
+        texture
+    }
+
+    fn read_slot(&mut self, list: &HostList, handle: u64) {
+        let Some(words) = crate::descriptor::record_at(handle) else { return };
+        let revision = crate::descriptor::view_revision();
+        if let Some(read) = self.get(list, words, revision) {
+            read.note_depth();
+        } else if let Some(view) = crate::descriptor::view_record(words) {
+            self.read(list, words, revision, &view);
+        }
+    }
 }
 
 /// Whether a table a list reads again, with nothing changed in the list
